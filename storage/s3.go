@@ -1037,7 +1037,7 @@ func (s *S3) retryOnNoSuchUpload(ctx aws.Context, to *url.URL, input *s3manager.
 	attempts := 0
 	for ; errHasCode(err, s3.ErrCodeNoSuchUpload) && attempts < s.noSuchUploadRetryCount; attempts++ {
 		// check if object exists and has the retry ID we provided, if it does
-		// then it means that one of previous uploads was succesfull despite the received error.
+		// then it means that one of previous uploads was successful despite the received error.
 		obj, sErr := s.Stat(ctx, to)
 		if sErr == nil && obj.retryID == expectedRetryID {
 			err = nil
