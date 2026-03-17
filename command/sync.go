@@ -232,7 +232,7 @@ func (s Sync) Run(c *cli.Context) error {
 	pipeReader, pipeWriter := io.Pipe() // create a reader, writer pipe to pass commands to run
 
 	// Create commands in background.
-	go s.planRun(c, onlySource, onlyDest, commonObjects, dsturl, strategy, pipeWriter, isBatch)
+	go s.planRun(ctx, c, onlySource, onlyDest, commonObjects, dsturl, strategy, pipeWriter, isBatch)
 
 	err = NewRun(c, pipeReader).Run(ctx)
 	return multierror.Append(err, merrorWaiter).ErrorOrNil()
@@ -437,6 +437,7 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 
 // planRun prepares the commands and writes them to writer 'w'.
 func (s Sync) planRun(
+	ctx context.Context,
 	c *cli.Context,
 	onlySource, onlyDest chan *url.URL,
 	common chan *ObjectPair,
@@ -462,14 +463,22 @@ func (s Sync) planRun(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for srcurl := range onlySource {
-			curDestURL := generateDestinationURL(srcurl, dsturl, isBatch)
-			command, err := generateCommand(c, "cp", defaultFlags, srcurl, curDestURL)
-			if err != nil {
-				printDebug(s.op, err, srcurl, curDestURL)
-				continue
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case srcurl, ok := <-onlySource:
+				if !ok {
+					return
+				}
+				curDestURL := generateDestinationURL(srcurl, dsturl, isBatch)
+				command, err := generateCommand(c, "cp", defaultFlags, srcurl, curDestURL)
+				if err != nil {
+					printDebug(s.op, err, srcurl, curDestURL)
+					continue
+				}
+				fmt.Fprintln(w, command)
 			}
-			fmt.Fprintln(w, command)
 		}
 	}()
 
@@ -477,21 +486,29 @@ func (s Sync) planRun(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for commonObject := range common {
-			sourceObject, destObject := commonObject.src, commonObject.dst
-			curSourceURL, curDestURL := sourceObject.URL, destObject.URL
-			err := strategy.ShouldSync(sourceObject, destObject) // check if object should be copied.
-			if err != nil {
-				printDebug(s.op, err, curSourceURL, curDestURL)
-				continue
-			}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case commonObject, ok := <-common:
+				if !ok {
+					return
+				}
+				sourceObject, destObject := commonObject.src, commonObject.dst
+				curSourceURL, curDestURL := sourceObject.URL, destObject.URL
+				err := strategy.ShouldSync(sourceObject, destObject) // check if object should be copied.
+				if err != nil {
+					printDebug(s.op, err, curSourceURL, curDestURL)
+					continue
+				}
 
-			command, err := generateCommand(c, "cp", defaultFlags, curSourceURL, curDestURL)
-			if err != nil {
-				printDebug(s.op, err, curSourceURL, curDestURL)
-				continue
+				command, err := generateCommand(c, "cp", defaultFlags, curSourceURL, curDestURL)
+				if err != nil {
+					printDebug(s.op, err, curSourceURL, curDestURL)
+					continue
+				}
+				fmt.Fprintln(w, command)
 			}
-			fmt.Fprintln(w, command)
 		}
 	}()
 
@@ -504,9 +521,18 @@ func (s Sync) planRun(
 			// or rewrite generateCommand function?
 			dstURLs := make([]*url.URL, 0, extsortChunkSize)
 
-			for d := range onlyDest {
-				dstURLs = append(dstURLs, d)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case d, ok := <-onlyDest:
+					if !ok {
+						goto doneCollecting
+					}
+					dstURLs = append(dstURLs, d)
+				}
 			}
+		doneCollecting:
 
 			if len(dstURLs) == 0 {
 				return
@@ -519,10 +545,17 @@ func (s Sync) planRun(
 			}
 			fmt.Fprintln(w, command)
 		} else {
-			// we only need  to consume them from the channel so that rest of the objects
+			// we only need to consume them from the channel so that rest of the objects
 			// can be sent to channel.
-			for d := range onlyDest {
-				_ = d
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case _, ok := <-onlyDest:
+					if !ok {
+						return
+					}
+				}
 			}
 		}
 	}()
@@ -594,7 +627,7 @@ func (s Sync) shouldStopSync(err error) bool {
 	}
 	if awsErr, ok := err.(awserr.Error); ok {
 		switch awsErr.Code() {
-		case "AccessDenied", "NoSuchBucket":
+		case "AccessDenied", "NoSuchBucket", "RequestError", "SerializationError":
 			return true
 		}
 	}
