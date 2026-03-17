@@ -527,16 +527,16 @@ func TestS3Retry(t *testing.T) {
 			expectedRetry: 5,
 		},
 
-		// Expired credential errors
+		// Expired credential errors (retryable — session cache is cleared on retry)
 		{
 			name:          "ExpiredToken",
 			err:           awserr.New("ExpiredToken", "expired token", nil),
-			expectedRetry: 0,
+			expectedRetry: 5,
 		},
 		{
 			name:          "ExpiredTokenException",
 			err:           awserr.New("ExpiredTokenException", "expired token exception", nil),
-			expectedRetry: 0,
+			expectedRetry: 5,
 		},
 
 		// Invalid Token errors
@@ -581,7 +581,7 @@ func TestS3Retry(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			sess := unit.Session
-			sess.Config.Retryer = newCustomRetryer(expectedRetry)
+			sess.Config.Retryer = newCustomRetryer(expectedRetry, globalSessionCache)
 
 			mockAPI := s3.New(sess)
 			mockS3 := &S3{

@@ -1289,7 +1289,7 @@ func (sc *SessionCache) newSession(ctx context.Context, opts Options) (*session.
 			WithLogger(sdkLogger{})
 	}
 
-	awsCfg.Retryer = newCustomRetryer(opts.MaxRetries)
+	awsCfg.Retryer = newCustomRetryer(opts.MaxRetries, sc)
 
 	useSharedConfig := session.SharedConfigEnable
 	{
@@ -1379,13 +1379,15 @@ func setSessionRegion(ctx context.Context, sess *session.Session, bucket string)
 // error codes. Such as, retry for S3 InternalError code.
 type customRetryer struct {
 	client.DefaultRetryer
+	sessionCache *SessionCache
 }
 
-func newCustomRetryer(maxRetries int) *customRetryer {
+func newCustomRetryer(maxRetries int, sc *SessionCache) *customRetryer {
 	return &customRetryer{
 		DefaultRetryer: client.DefaultRetryer{
 			NumMaxRetries: maxRetries,
 		},
+		sessionCache: sc,
 	}
 }
 
@@ -1397,8 +1399,16 @@ func (c *customRetryer) ShouldRetry(req *request.Request) bool {
 		shouldRetry = c.DefaultRetryer.ShouldRetry(req)
 	}
 
-	// Errors related to tokens
-	if errHasCode(req.Error, "ExpiredToken") || errHasCode(req.Error, "ExpiredTokenException") || errHasCode(req.Error, "InvalidToken") {
+	// Expired tokens are retryable after clearing the session cache so a
+	// fresh session (with new credentials) is created on the next attempt.
+	if errHasCode(req.Error, "ExpiredToken") || errHasCode(req.Error, "ExpiredTokenException") {
+		c.sessionCache.clear()
+		log.Debug(log.DebugMessage{Err: "session token expired, clearing cache and retrying"})
+		return true
+	}
+
+	// Invalid tokens are not retryable.
+	if errHasCode(req.Error, "InvalidToken") {
 		return false
 	}
 
