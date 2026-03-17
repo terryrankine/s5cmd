@@ -62,6 +62,11 @@ func TestNewSessionPathStyle(t *testing.T) {
 			expectPathStyle: false,
 		},
 		{
+			name:            "expect_virtual_host_style_for_tencent_cos",
+			endpoint:        urlpkg.URL{Scheme: "https", Host: "cos.ap-guangzhou.myqcloud.com"},
+			expectPathStyle: false,
+		},
+		{
 			name:            "expect_path_style_for_localhost",
 			endpoint:        urlpkg.URL{Scheme: "http", Host: "127.0.0.1"},
 			expectPathStyle: true,
@@ -90,6 +95,45 @@ func TestNewSessionPathStyle(t *testing.T) {
 			got := aws.BoolValue(sess.Config.S3ForcePathStyle)
 			if got != tc.expectPathStyle {
 				t.Fatalf("expected: %v, got: %v", tc.expectPathStyle, got)
+			}
+		})
+	}
+}
+
+func TestIsTencentEndpoint(t *testing.T) {
+	testcases := []struct {
+		name     string
+		endpoint urlpkg.URL
+		expected bool
+	}{
+		{
+			name:     "tencent_cos_endpoint",
+			endpoint: urlpkg.URL{Scheme: "https", Host: "cos.ap-guangzhou.myqcloud.com"},
+			expected: true,
+		},
+		{
+			name:     "tencent_cos_endpoint_different_region",
+			endpoint: urlpkg.URL{Scheme: "https", Host: "cos.ap-beijing.myqcloud.com"},
+			expected: true,
+		},
+		{
+			name:     "non_tencent_endpoint",
+			endpoint: urlpkg.URL{Scheme: "https", Host: "example.com"},
+			expected: false,
+		},
+		{
+			name:     "google_endpoint",
+			endpoint: urlpkg.URL{Scheme: "https", Host: gcsEndpoint},
+			expected: false,
+		},
+	}
+
+	for _, tc := range testcases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsTencentEndpoint(tc.endpoint)
+			if got != tc.expected {
+				t.Fatalf("expected: %v, got: %v", tc.expected, got)
 			}
 		})
 	}
