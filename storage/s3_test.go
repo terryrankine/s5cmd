@@ -1385,3 +1385,47 @@ func (e tempError) Error() string { return e.err.Error() }
 func (e tempError) Temporary() bool { return e.temp }
 
 func (e *tempError) Unwrap() error { return e.err }
+
+func TestIsCopySourceTooLargeError(t *testing.T) {
+	testcases := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "InvalidRequest_copy_source_too_large",
+			err:      awserr.New("InvalidRequest", "The specified copy source is too large", nil),
+			expected: true,
+		},
+		{
+			name:     "EntityTooLarge",
+			err:      awserr.New("EntityTooLarge", "Your proposed upload exceeds the maximum allowed size", nil),
+			expected: true,
+		},
+		{
+			name:     "unrelated_error",
+			err:      awserr.New("AccessDenied", "access denied", nil),
+			expected: false,
+		},
+		{
+			name:     "nil_error",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "non_aws_error",
+			err:      fmt.Errorf("some random error"),
+			expected: false,
+		},
+	}
+
+	for _, tc := range testcases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := isCopySourceTooLargeError(tc.err)
+			if got != tc.expected {
+				t.Fatalf("expected: %v, got: %v", tc.expected, got)
+			}
+		})
+	}
+}

@@ -51,6 +51,10 @@ const (
 	// Tencent Cloud Object Storage endpoint suffix
 	tencentCOSEndpointSuffix = ".myqcloud.com"
 
+	// defaultCopyPartSize is the part size for multipart copy (5 GiB).
+	// Objects larger than this cannot be copied with a single CopyObject call.
+	defaultCopyPartSize int64 = 5 * 1024 * 1024 * 1024
+
 	// the key of the object metadata which is used to handle retry decision on NoSuchUpload error
 	metadataKeyRetryID = "s5cmd-upload-retry-id"
 )
@@ -568,7 +572,140 @@ func (s *S3) Copy(ctx context.Context, from, to *url.URL, metadata Metadata) err
 	}
 
 	_, err := s.api.CopyObject(input)
+	if err != nil && isCopySourceTooLargeError(err) {
+		return s.multipartCopy(ctx, from, to, input)
+	}
 	return err
+}
+
+// isCopySourceTooLargeError checks whether the error indicates that the source
+// object is too large for a single CopyObject call (>5 GiB).
+func isCopySourceTooLargeError(err error) bool {
+	var awsErr awserr.Error
+	if errors.As(err, &awsErr) {
+		// InvalidRequest with "copy source is too large" message
+		if awsErr.Code() == "InvalidRequest" && strings.Contains(awsErr.Message(), "copy source is too large") {
+			return true
+		}
+		// EntityTooLarge
+		if awsErr.Code() == "EntityTooLarge" {
+			return true
+		}
+	}
+	return false
+}
+
+// multipartCopy copies an object larger than 5 GiB using the multipart upload
+// API with UploadPartCopy. Note: MetadataDirective is not supported by
+// UploadPartCopy, so metadata from the source is not preserved automatically
+// when using this path.
+func (s *S3) multipartCopy(ctx context.Context, from, to *url.URL, originalInput *s3.CopyObjectInput) error {
+	// First, get the source object size
+	headOutput, err := s.api.HeadObjectWithContext(ctx, &s3.HeadObjectInput{
+		Bucket:       aws.String(from.Bucket),
+		Key:          aws.String(from.Path),
+		RequestPayer: s.RequestPayer(),
+	})
+	if err != nil {
+		return err
+	}
+	objectSize := aws.Int64Value(headOutput.ContentLength)
+
+	createInput := &s3.CreateMultipartUploadInput{
+		Bucket:       originalInput.Bucket,
+		Key:          originalInput.Key,
+		RequestPayer: s.RequestPayer(),
+	}
+	if originalInput.StorageClass != nil {
+		createInput.StorageClass = originalInput.StorageClass
+	}
+	if originalInput.ACL != nil {
+		createInput.ACL = originalInput.ACL
+	}
+	if originalInput.CacheControl != nil {
+		createInput.CacheControl = originalInput.CacheControl
+	}
+	if originalInput.ServerSideEncryption != nil {
+		createInput.ServerSideEncryption = originalInput.ServerSideEncryption
+	}
+	if originalInput.SSEKMSKeyId != nil {
+		createInput.SSEKMSKeyId = originalInput.SSEKMSKeyId
+	}
+	if originalInput.ContentEncoding != nil {
+		createInput.ContentEncoding = originalInput.ContentEncoding
+	}
+	if originalInput.ContentDisposition != nil {
+		createInput.ContentDisposition = originalInput.ContentDisposition
+	}
+	if originalInput.ContentType != nil {
+		createInput.ContentType = originalInput.ContentType
+	}
+	if originalInput.Expires != nil {
+		createInput.Expires = originalInput.Expires
+	}
+
+	createOutput, err := s.api.CreateMultipartUploadWithContext(ctx, createInput)
+	if err != nil {
+		return err
+	}
+	uploadID := aws.StringValue(createOutput.UploadId)
+
+	abortUpload := func() {
+		// Use background context for abort since the original context may be cancelled
+		s.api.AbortMultipartUploadWithContext(context.Background(), &s3.AbortMultipartUploadInput{
+			Bucket:   originalInput.Bucket,
+			Key:      originalInput.Key,
+			UploadId: aws.String(uploadID),
+		})
+	}
+
+	var completedParts []*s3.CompletedPart
+	partNumber := int64(1)
+
+	for bytePosition := int64(0); bytePosition < objectSize; bytePosition += defaultCopyPartSize {
+		lastByte := bytePosition + defaultCopyPartSize - 1
+		if lastByte >= objectSize {
+			lastByte = objectSize - 1
+		}
+
+		copyRange := fmt.Sprintf("bytes=%d-%d", bytePosition, lastByte)
+		partInput := &s3.UploadPartCopyInput{
+			Bucket:          originalInput.Bucket,
+			Key:             originalInput.Key,
+			CopySource:      originalInput.CopySource,
+			UploadId:        aws.String(uploadID),
+			PartNumber:      aws.Int64(partNumber),
+			CopySourceRange: aws.String(copyRange),
+			RequestPayer:    s.RequestPayer(),
+		}
+
+		partOutput, err := s.api.UploadPartCopyWithContext(ctx, partInput)
+		if err != nil {
+			abortUpload()
+			return fmt.Errorf("multipart copy part %d failed: %w", partNumber, err)
+		}
+
+		completedParts = append(completedParts, &s3.CompletedPart{
+			ETag:       partOutput.CopyPartResult.ETag,
+			PartNumber: aws.Int64(partNumber),
+		})
+		partNumber++
+	}
+
+	_, err = s.api.CompleteMultipartUploadWithContext(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   originalInput.Bucket,
+		Key:      originalInput.Key,
+		UploadId: aws.String(uploadID),
+		MultipartUpload: &s3.CompletedMultipartUpload{
+			Parts: completedParts,
+		},
+	})
+	if err != nil {
+		abortUpload()
+		return fmt.Errorf("multipart copy completion failed: %w", err)
+	}
+
+	return nil
 }
 
 // Read fetches the remote object and returns its contents as an io.ReadCloser.

@@ -315,8 +315,7 @@ more details and examples on `s5cmd run` are presented in a [later section](./RE
 Will copy all the matching objects to the given S3 prefix, respecting the source
 folder hierarchy.
 
-⚠️ Copying objects (from S3 to S3) larger than 5GB is not supported yet. We have
-an [open ticket](https://github.com/peak/s5cmd/issues/29) to track the issue.
+ℹ️ Objects larger than 5 GiB are automatically copied using multipart copy.
 
 #### Using Exclude and Include Filters
 `s5cmd` supports the `--exclude` and `--include` flags, which can be used to specify patterns for objects to be excluded or included in commands.
