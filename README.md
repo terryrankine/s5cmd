@@ -59,7 +59,7 @@ binaries for Linux, macOS and Windows.
 
 For macOS, a [homebrew](https://brew.sh) tap is provided:
 
-    brew install peak/tap/s5cmd
+    brew install s5cmd
 
 ### Unofficial Releases (by Community)
 [![Packaging status](https://repology.org/badge/tiny-repos/s5cmd.svg)](https://repology.org/project/s5cmd/versions)
@@ -136,7 +136,7 @@ then filtering the results in-memory. For example, for the following command;
 
     s5cmd cp 's3://bucket/logs/2020/03/*' .
 
-first a `ListObjects` request is send, then the copy operation will be executed
+first a `ListObjects` request is sent, then the copy operation will be executed
 against each matching object, in parallel.
 
 
@@ -393,6 +393,12 @@ rm s3://bucket/2020/03/19/file2.gz
 mv s3://bucket/2020/03/18/file1.gz s3://bucket/2020/03/18/original/file.gz
 ```
 
+> **Note**
+> If your S3 object keys contain characters that are normally interpreted as wildcards (`*`, `?`, `[`), use the `--raw` flag in your commands to prevent wildcard expansion:
+> ```
+> cp --raw 's3://bucket/path/file[1].gz' .
+> ```
+
 #### Sync
 `sync` command synchronizes S3 buckets, prefixes, directories and files between S3 buckets and prefixes as well.
 It compares files between source and destination, taking source files as **source-of-truth**;
@@ -499,7 +505,7 @@ will output
 
     cp s3://bucket/pre/file1.gz s3://another-bucket/file1.gz
     ...
-    cp s3://bucket/pre/last.txt s3://anohter-bucket/last.txt
+    cp s3://bucket/pre/last.txt s3://another-bucket/last.txt
 
 however, those copy operations will not be performed. It is displaying what
 `s5cmd` will do when ran without `--dry-run`
@@ -571,7 +577,7 @@ path-style.
 `s5cmd` uses an exponential backoff retry mechanism for transient or potential
 server-side throttling errors. Non-retriable errors, such as `invalid
 credentials`, `authorization errors` etc, will not be retried. By default,
-`s5cmd` will retry 10 times for up to a minute. Number of retries are adjustable
+`s5cmd` will retry 10 times for up to a minute. Number of retries is adjustable
 via `--retry-count` flag.
 
 ℹ️ Enable debug level logging for displaying retryable errors.
