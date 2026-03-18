@@ -389,11 +389,9 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 		}
 
 		// read and print the external sort errors
-		go func() {
-			for err := range srcErrCh {
-				printError(s.fullCommand, s.op, err)
-			}
-		}()
+		for err := range srcErrCh {
+			printError(s.fullCommand, s.op, err)
+		}
 	}()
 
 	// get destination objects.
@@ -436,11 +434,9 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 		}
 
 		// read and print the external sort errors
-		go func() {
-			for err := range dstErrCh {
-				printError(s.fullCommand, s.op, err)
-			}
-		}()
+		for err := range dstErrCh {
+			printError(s.fullCommand, s.op, err)
+		}
 	}()
 
 	return sourceObjects, destObjects, nil
