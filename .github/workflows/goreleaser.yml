@@ -7,13 +7,14 @@ jobs:
   gcs_test:
     name: gcs-test
     runs-on: ubuntu-latest
-    if: ${{ secrets.S5CMD_GCS_ACCESS_KEY_ID != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: 1.24.x
-      - run: make test_without_race
+      - name: Run GCS tests
+        if: env.S5CMD_ACCESS_KEY_ID != ''
+        run: make test_without_race
         env:
           S5CMD_ACCESS_KEY_ID: ${{ secrets.S5CMD_GCS_ACCESS_KEY_ID }}
           S5CMD_SECRET_ACCESS_KEY: ${{ secrets.S5CMD_GCS_SECRET_ACCESS_KEY }}
@@ -21,10 +22,13 @@ jobs:
           S5CMD_IS_VIRTUAL_HOST: 1
           S5CMD_REGION: ${{ secrets.S5CMD_GCS_REGION }}
           S5CMD_I_KNOW_WHAT_IM_DOING: 1
+      - name: Skip GCS tests
+        if: env.S5CMD_ACCESS_KEY_ID == ''
+        run: echo "GCS secrets not configured, skipping"
+        env:
+          S5CMD_ACCESS_KEY_ID: ${{ secrets.S5CMD_GCS_ACCESS_KEY_ID }}
 
   goreleaser:
-    needs: [ gcs_test ]
-    if: ${{ always() && !failure() }}
     runs-on: ubuntu-latest
     steps:
       -
