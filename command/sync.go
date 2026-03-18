@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -181,6 +180,7 @@ func (s Sync) Run(c *cli.Context) error {
 	}
 
 	ctx, cancel := context.WithCancel(c.Context)
+	defer cancel()
 
 	sourceObjects, destObjects, err := s.getSourceAndDestinationObjects(ctx, cancel, srcurl, dsturl)
 	if err != nil {
@@ -219,9 +219,10 @@ func (s Sync) Run(c *cli.Context) error {
 		for err := range waiter.Err() {
 			if strings.Contains(err.Error(), "too many open files") {
 				fmt.Println(strings.TrimSpace(fdlimitWarning))
-				fmt.Printf("ERROR %v\n", err)
-
-				os.Exit(1)
+				printError(s.fullCommand, s.op, err)
+				merrorWaiter = multierror.Append(merrorWaiter, err)
+				cancel()
+				continue
 			}
 			printError(s.fullCommand, s.op, err)
 			merrorWaiter = multierror.Append(merrorWaiter, err)
@@ -522,17 +523,21 @@ func (s Sync) planRun(
 			dstURLs := make([]*url.URL, 0, extsortChunkSize)
 
 			for {
+				done := false
 				select {
 				case <-ctx.Done():
 					return
 				case d, ok := <-onlyDest:
 					if !ok {
-						goto doneCollecting
+						done = true
+					} else {
+						dstURLs = append(dstURLs, d)
 					}
-					dstURLs = append(dstURLs, d)
+				}
+				if done {
+					break
 				}
 			}
-		doneCollecting:
 
 			if len(dstURLs) == 0 {
 				return
