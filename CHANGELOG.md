@@ -1,4 +1,36 @@
 # Changelog
+## Unreleased
+
+#### Features
+- Added automatic multipart copy for S3 objects larger than 5 GiB. ([#856](https://github.com/peak/s5cmd/issues/856))
+- Added Tencent Cloud Object Storage (COS) support. ([#809](https://github.com/peak/s5cmd/issues/809))
+
+#### Improvements
+- Upgraded aws-sdk-go from v1.44.298 to v1.55.5, adding EKS Pod Identity support. ([#769](https://github.com/peak/s5cmd/issues/769))
+- Skip unnecessary HeadObject call when progress bar is disabled. ([#793](https://github.com/peak/s5cmd/issues/793))
+- Updated GitHub Actions to latest versions (checkout v4, setup-go v5).
+- Added codespell CI workflow for typo detection. ([#701](https://github.com/peak/s5cmd/issues/701))
+- Dropped Go 1.20 from CI matrix (EOL).
+
+#### Bugfixes
+- Fixed `--profile` flag to work with SSO and assume-role credential sources. ([#847](https://github.com/peak/s5cmd/issues/847))
+- Fixed nil pointer dereference in `shouldOverride` when stat returns no object. ([#838](https://github.com/peak/s5cmd/issues/838))
+- Fixed non-regular files producing errors when they match exclude patterns. ([#776](https://github.com/peak/s5cmd/issues/776))
+- Fixed shell quoting for object keys with special characters in sync commands. ([#761](https://github.com/peak/s5cmd/issues/761))
+- Fixed sync error handling to stop on network and serialization failures. ([#698](https://github.com/peak/s5cmd/issues/698))
+- Fixed expired session tokens to retry with fresh credentials instead of failing. ([#683](https://github.com/peak/s5cmd/issues/683))
+- Fixed MinIO CI image reference (`bitnami` → `bitnamilegacy`). ([#840](https://github.com/peak/s5cmd/issues/840))
+- Fixed missing subcommand in `cp` help example, typos, and documentation. ([#857](https://github.com/peak/s5cmd/issues/857), [#828](https://github.com/peak/s5cmd/issues/828), [#783](https://github.com/peak/s5cmd/issues/783), [#774](https://github.com/peak/s5cmd/issues/774), [#781](https://github.com/peak/s5cmd/issues/781))
+- Fixed data races in progress bar counter reads and statistics map access.
+- Fixed nil pointer dereference in metadata retry ID access.
+- Fixed resource leak in `Select()` when S3 API call fails.
+- Fixed `os.Exit(1)` in error goroutines replaced with context cancellation.
+- Fixed `panic()` in copy command replaced with error return.
+- Fixed dry-run mode returning zero-value file handles that panic on use.
+- Fixed argument count error message showing min instead of max.
+- Fixed context leak from missing `defer cancel()` in sync command.
+- Fixed test helper assigning access key ID as region value.
+
 ## v2.3.0 - 16 Dec 2024
 
 #### Breaking changes
