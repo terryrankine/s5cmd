@@ -3,6 +3,7 @@ package log
 import (
 	"fmt"
 	"os"
+	"sync"
 )
 
 // output is an internal container for messages to be logged.
@@ -15,10 +16,14 @@ type output struct {
 // logging is not possible if all workers print logs at the same time.
 var outputCh = make(chan output, 10000)
 
-var global *Logger
+var (
+	global    *Logger
+	closeOnce sync.Once
+)
 
 // Init inits global logger.
 func Init(level string, json bool, opts ...LoggerOption) {
+	closeOnce = sync.Once{}
 	global = New(level, json, opts...)
 }
 
@@ -48,16 +53,18 @@ func Error(msg Message) {
 	global.printf(LevelError, msg, global.stderr)
 }
 
-// Close closes logger and its channel.
+// Close closes logger and its channel. Safe to call multiple times.
 func Close() {
-	if global != nil {
-		close(outputCh)
-		<-global.donech
+	closeOnce.Do(func() {
+		if global != nil {
+			close(outputCh)
+			<-global.donech
 
-		if global.logFile != nil {
-			global.logFile.Close()
+			if global.logFile != nil {
+				global.logFile.Close()
+			}
 		}
-	}
+	})
 }
 
 // LoggerOption configures the Logger.
