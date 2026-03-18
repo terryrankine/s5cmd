@@ -592,7 +592,7 @@ func (s *S3) Copy(ctx context.Context, from, to *url.URL, metadata Metadata) err
 
 	_, err := s.api.CopyObject(input)
 	if err != nil && isCopySourceTooLargeError(err) {
-		return s.multipartCopy(ctx, from, to, input)
+		return s.multipartCopy(ctx, from, input)
 	}
 	return err
 }
@@ -618,7 +618,7 @@ func isCopySourceTooLargeError(err error) bool {
 // API with UploadPartCopy. Since MetadataDirective is not supported by
 // UploadPartCopy, we retrieve source metadata via HeadObject and apply it to
 // the new object.
-func (s *S3) multipartCopy(ctx context.Context, from, to *url.URL, originalInput *s3.CopyObjectInput) error {
+func (s *S3) multipartCopy(ctx context.Context, from *url.URL, originalInput *s3.CopyObjectInput) error {
 	// Get the source object size and metadata
 	headOutput, err := s.api.HeadObjectWithContext(ctx, &s3.HeadObjectInput{
 		Bucket:       aws.String(from.Bucket),
