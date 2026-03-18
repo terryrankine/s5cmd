@@ -90,7 +90,7 @@ type LogProgressBar struct {
 	totalBytes       int64
 	completedBytes   int64
 	startTime        time.Time
-	mu             sync.Mutex
+	mu               sync.Mutex
 	lastUpdate       time.Time
 	updateInterval   time.Duration
 }

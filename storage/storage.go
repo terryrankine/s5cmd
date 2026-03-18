@@ -12,7 +12,6 @@ import (
 	"os"
 	"time"
 
-
 	"github.com/peak/s5cmd/v2/log"
 	"github.com/peak/s5cmd/v2/storage/url"
 	"github.com/peak/s5cmd/v2/strutil"

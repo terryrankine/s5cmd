@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"strings"
 
-
 	"github.com/peak/s5cmd/v2/strutil"
 )
 

@@ -58,7 +58,7 @@ func TestObjectCompare(t *testing.T) {
 		{"s3://bucket/a", "s3://bucket/b", -1},
 		{"s3://bucket/b", "s3://bucket/a", 1},
 		{"s3://bucket/same", "s3://bucket/same", 0},
-		{"s3://bucket/abc", "s3://bucket/abd", -1},
+		{"s3://bucket/abc", "s3://bucket/xyz", -1},
 	}
 
 	for _, tc := range tests {
