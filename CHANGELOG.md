@@ -1,5 +1,5 @@
 # Changelog
-## Unreleased
+## v2.4.0 - 18 Mar 2026
 
 #### Features
 - Added automatic multipart copy for S3 objects larger than 5 GiB. ([#856](https://github.com/peak/s5cmd/issues/856))
