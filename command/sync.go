@@ -357,7 +357,7 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 	go func() {
 		defer close(sourceObjects)
 		unfilteredSrcObjectChannel := sourceClient.List(ctx, srcurl, s.followSymlinks)
-		filteredSrcObjectChannel := make(chan extsort.SortType, extsortChannelBufferSize)
+		filteredSrcObjectChannel := make(chan storage.Object, extsortChannelBufferSize)
 
 		go func() {
 			defer close(filteredSrcObjectChannel)
@@ -379,17 +379,13 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 			}
 		}()
 
-		var (
-			sorter        *extsort.SortTypeSorter
-			srcOutputChan <-chan extsort.SortType
+		sorter, srcOutputChan, srcErrCh := extsort.Generic[storage.Object](
+			filteredSrcObjectChannel, storage.FromBytes, storage.Object.ToBytes, storage.Compare, extsortConfig,
 		)
-
-		sorter, srcOutputChan, srcErrCh := extsort.New(filteredSrcObjectChannel, storage.FromBytes, storage.Less, extsortConfig)
 		sorter.Sort(ctx)
 
 		for srcObject := range srcOutputChan {
-			o := srcObject.(storage.Object)
-			sourceObjects <- &o
+			sourceObjects <- &srcObject
 		}
 
 		// read and print the external sort errors
@@ -402,7 +398,7 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 	go func() {
 		defer close(destObjects)
 		unfilteredDestObjectsChannel := destClient.List(ctx, destObjectsURL, false)
-		filteredDstObjectChannel := make(chan extsort.SortType, extsortChannelBufferSize)
+		filteredDstObjectChannel := make(chan storage.Object, extsortChannelBufferSize)
 
 		go func() {
 			defer close(filteredDstObjectChannel)
@@ -424,17 +420,13 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 			}
 		}()
 
-		var (
-			dstSorter     *extsort.SortTypeSorter
-			dstOutputChan <-chan extsort.SortType
+		dstSorter, dstOutputChan, dstErrCh := extsort.Generic[storage.Object](
+			filteredDstObjectChannel, storage.FromBytes, storage.Object.ToBytes, storage.Compare, extsortConfig,
 		)
-
-		dstSorter, dstOutputChan, dstErrCh := extsort.New(filteredDstObjectChannel, storage.FromBytes, storage.Less, extsortConfig)
 		dstSorter.Sort(ctx)
 
 		for destObject := range dstOutputChan {
-			o := destObject.(storage.Object)
-			destObjects <- &o
+			destObjects <- &destObject
 		}
 
 		// read and print the external sort errors

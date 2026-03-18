@@ -643,7 +643,7 @@ func TestToFromBytes(t *testing.T) {
 
 			url.relativePath = tc.relative
 
-			newURL := FromBytes(url.ToBytes()).(*URL)
+			newURL := FromBytes(url.ToBytes())
 
 			if !reflect.DeepEqual(url, newURL) {
 				t.Errorf("got = %q, want %q", url, newURL)
