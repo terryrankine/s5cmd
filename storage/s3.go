@@ -151,7 +151,7 @@ func (s *S3) Stat(ctx context.Context, url *url.URL) (*Object, error) {
 	}
 
 	if s.noSuchUploadRetryCount > 0 {
-		if retryID, ok := output.Metadata[metadataKeyRetryID]; ok {
+		if retryID, ok := output.Metadata[metadataKeyRetryID]; ok && retryID != nil {
 			obj.retryID = *retryID
 		}
 	}
@@ -552,6 +552,9 @@ func (s *S3) Copy(ctx context.Context, from, to *url.URL, metadata Metadata) err
 
 	// add retry ID to the object metadata
 	if s.noSuchUploadRetryCount > 0 {
+		if input.Metadata == nil {
+			input.Metadata = make(map[string]*string)
+		}
 		input.Metadata[metadataKeyRetryID] = generateRetryID()
 	}
 
@@ -596,11 +599,11 @@ func isCopySourceTooLargeError(err error) bool {
 }
 
 // multipartCopy copies an object larger than 5 GiB using the multipart upload
-// API with UploadPartCopy. Note: MetadataDirective is not supported by
-// UploadPartCopy, so metadata from the source is not preserved automatically
-// when using this path.
+// API with UploadPartCopy. Since MetadataDirective is not supported by
+// UploadPartCopy, we retrieve source metadata via HeadObject and apply it to
+// the new object.
 func (s *S3) multipartCopy(ctx context.Context, from, to *url.URL, originalInput *s3.CopyObjectInput) error {
-	// First, get the source object size
+	// Get the source object size and metadata
 	headOutput, err := s.api.HeadObjectWithContext(ctx, &s3.HeadObjectInput{
 		Bucket:       aws.String(from.Bucket),
 		Key:          aws.String(from.Path),
@@ -624,24 +627,53 @@ func (s *S3) multipartCopy(ctx context.Context, from, to *url.URL, originalInput
 	}
 	if originalInput.CacheControl != nil {
 		createInput.CacheControl = originalInput.CacheControl
+	} else if headOutput.CacheControl != nil {
+		createInput.CacheControl = headOutput.CacheControl
 	}
 	if originalInput.ServerSideEncryption != nil {
 		createInput.ServerSideEncryption = originalInput.ServerSideEncryption
+	} else if headOutput.ServerSideEncryption != nil {
+		createInput.ServerSideEncryption = headOutput.ServerSideEncryption
 	}
 	if originalInput.SSEKMSKeyId != nil {
 		createInput.SSEKMSKeyId = originalInput.SSEKMSKeyId
 	}
 	if originalInput.ContentEncoding != nil {
 		createInput.ContentEncoding = originalInput.ContentEncoding
+	} else if headOutput.ContentEncoding != nil {
+		createInput.ContentEncoding = headOutput.ContentEncoding
 	}
 	if originalInput.ContentDisposition != nil {
 		createInput.ContentDisposition = originalInput.ContentDisposition
+	} else if headOutput.ContentDisposition != nil {
+		createInput.ContentDisposition = headOutput.ContentDisposition
 	}
 	if originalInput.ContentType != nil {
 		createInput.ContentType = originalInput.ContentType
+	} else if headOutput.ContentType != nil {
+		createInput.ContentType = headOutput.ContentType
 	}
 	if originalInput.Expires != nil {
 		createInput.Expires = originalInput.Expires
+	} else if headOutput.Expires != nil {
+		if t, err := time.Parse(time.RFC1123, aws.StringValue(headOutput.Expires)); err == nil {
+			createInput.Expires = aws.Time(t)
+		}
+	}
+
+	// Preserve source object's user-defined metadata
+	if len(headOutput.Metadata) > 0 {
+		merged := make(map[string]*string, len(headOutput.Metadata))
+		for k, v := range headOutput.Metadata {
+			merged[k] = v
+		}
+		// Let explicitly-set metadata from originalInput take precedence
+		for k, v := range originalInput.Metadata {
+			merged[k] = v
+		}
+		createInput.Metadata = merged
+	} else if len(originalInput.Metadata) > 0 {
+		createInput.Metadata = originalInput.Metadata
 	}
 
 	createOutput, err := s.api.CreateMultipartUploadWithContext(ctx, createInput)
@@ -890,6 +922,8 @@ func (s *S3) Select(ctx context.Context, url *url.URL, query *SelectQuery, resul
 
 	resp, err := s.api.SelectObjectContentWithContext(ctx, input)
 	if err != nil {
+		writer.Close()
+		reader.Close()
 		return err
 	}
 
@@ -910,7 +944,9 @@ func (s *S3) Select(ctx context.Context, url *url.URL, query *SelectQuery, resul
 
 				switch e := event.(type) {
 				case *s3.RecordsEvent:
-					writer.Write(e.Payload)
+					if _, wErr := writer.Write(e.Payload); wErr != nil {
+						return
+					}
 				}
 			}
 		}
@@ -1002,6 +1038,9 @@ func (s *S3) Put(
 
 	// add retry ID to the object metadata
 	if s.noSuchUploadRetryCount > 0 {
+		if input.Metadata == nil {
+			input.Metadata = make(map[string]*string)
+		}
 		input.Metadata[metadataKeyRetryID] = generateRetryID()
 	}
 
@@ -1030,7 +1069,7 @@ func (s *S3) retryOnNoSuchUpload(ctx aws.Context, to *url.URL, input *s3manager.
 	err error, uploaderOpts ...func(*s3manager.Uploader),
 ) error {
 	var expectedRetryID string
-	if ID, ok := input.Metadata[metadataKeyRetryID]; ok {
+	if ID, ok := input.Metadata[metadataKeyRetryID]; ok && ID != nil {
 		expectedRetryID = *ID
 	}
 
