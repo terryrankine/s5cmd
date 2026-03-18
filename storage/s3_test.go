@@ -1386,6 +1386,62 @@ func (e tempError) Temporary() bool { return e.temp }
 
 func (e *tempError) Unwrap() error { return e.err }
 
+func TestIsVirtualHostStyleWithAddressingStyle(t *testing.T) {
+	testcases := []struct {
+		name            string
+		endpoint        urlpkg.URL
+		addressingStyle string
+		expected        bool
+	}{
+		{
+			name:            "virtual_style_overrides_custom_endpoint",
+			endpoint:        urlpkg.URL{Scheme: "http", Host: "127.0.0.1"},
+			addressingStyle: "virtual",
+			expected:        true,
+		},
+		{
+			name:            "path_style_with_custom_endpoint",
+			endpoint:        urlpkg.URL{Scheme: "https", Host: "example.com"},
+			addressingStyle: "path",
+			expected:        false,
+		},
+		{
+			name:            "path_style_does_not_override_default_endpoint",
+			endpoint:        urlpkg.URL{},
+			addressingStyle: "path",
+			expected:        true,
+		},
+		{
+			name:            "virtual_style_with_custom_endpoint",
+			endpoint:        urlpkg.URL{Scheme: "https", Host: "example.com"},
+			addressingStyle: "virtual",
+			expected:        true,
+		},
+		{
+			name:            "empty_addressing_style_with_custom_endpoint_falls_back",
+			endpoint:        urlpkg.URL{Scheme: "http", Host: "127.0.0.1"},
+			addressingStyle: "",
+			expected:        false,
+		},
+		{
+			name:            "empty_addressing_style_with_default_endpoint_falls_back",
+			endpoint:        urlpkg.URL{},
+			addressingStyle: "",
+			expected:        true,
+		},
+	}
+
+	for _, tc := range testcases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := isVirtualHostStyle(tc.endpoint, tc.addressingStyle)
+			if got != tc.expected {
+				t.Fatalf("expected: %v, got: %v", tc.expected, got)
+			}
+		})
+	}
+}
+
 func TestIsCopySourceTooLargeError(t *testing.T) {
 	testcases := []struct {
 		name     string
