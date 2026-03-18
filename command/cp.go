@@ -917,7 +917,10 @@ func (c Copy) shouldOverride(ctx context.Context, srcurl *url.URL, dsturl *url.U
 	if c.ifSourceNewer {
 		srcMod, dstMod := srcObj.ModTime, dstObj.ModTime
 
-		if !srcMod.After(*dstMod) {
+		if srcMod == nil || dstMod == nil {
+			// If either modification time is unavailable, proceed with copy
+			stickyErr = nil
+		} else if !srcMod.After(*dstMod) {
 			stickyErr = errorpkg.ErrObjectIsNewer
 		} else {
 			stickyErr = nil
