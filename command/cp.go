@@ -494,6 +494,8 @@ func (c Copy) Run(ctx context.Context) error {
 		return err
 	}
 
+	_, progressDisabled := c.progressbar.(*progressbar.NoOp)
+
 	for object := range objch {
 		if errorpkg.IsCancelation(object.Err) || object.Type.IsDir() {
 			continue
@@ -533,7 +535,7 @@ func (c Copy) Run(ctx context.Context) error {
 		var task parallel.Task
 
 		if object.Size == 0 && srcurl.Type != c.dst.Type {
-			if _, isNoOp := c.progressbar.(*progressbar.NoOp); !isNoOp {
+			if !progressDisabled {
 				obj, err := client.Stat(ctx, srcurl)
 				if err == nil {
 					object.Size = obj.Size
