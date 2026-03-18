@@ -7,6 +7,7 @@ jobs:
   gcs_test:
     name: gcs-test
     runs-on: ubuntu-latest
+    if: ${{ secrets.S5CMD_GCS_ACCESS_KEY_ID != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -23,6 +24,7 @@ jobs:
 
   goreleaser:
     needs: [ gcs_test ]
+    if: ${{ always() && !failure() }}
     runs-on: ubuntu-latest
     steps:
       -
