@@ -3,6 +3,7 @@ package progressbar
 import (
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -89,6 +90,7 @@ type LogProgressBar struct {
 	totalBytes       int64
 	completedBytes   int64
 	startTime        time.Time
+	mu             sync.Mutex
 	lastUpdate       time.Time
 	updateInterval   time.Duration
 }
@@ -131,10 +133,14 @@ func (lp *LogProgressBar) AddTotalBytes(bytes int64) {
 
 func (lp *LogProgressBar) maybeUpdate() {
 	now := time.Now()
+	lp.mu.Lock()
 	if now.Sub(lp.lastUpdate) >= lp.updateInterval {
 		lp.lastUpdate = now
+		lp.mu.Unlock()
 		lp.print()
+		return
 	}
+	lp.mu.Unlock()
 }
 
 func (lp *LogProgressBar) print() {
