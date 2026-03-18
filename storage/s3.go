@@ -582,11 +582,12 @@ func (s *S3) Copy(ctx context.Context, from, to *url.URL, metadata Metadata) err
 	}
 
 	if len(metadata.UserDefined) != 0 {
-		m := make(map[string]*string)
-		for k, v := range metadata.UserDefined {
-			m[k] = aws.String(v)
+		if input.Metadata == nil {
+			input.Metadata = make(map[string]*string)
 		}
-		input.Metadata = m
+		for k, v := range metadata.UserDefined {
+			input.Metadata[k] = aws.String(v)
+		}
 	}
 
 	_, err := s.api.CopyObject(input)
@@ -1060,11 +1061,12 @@ func (s *S3) Put(
 	}
 
 	if len(metadata.UserDefined) != 0 {
-		m := make(map[string]*string)
-		for k, v := range metadata.UserDefined {
-			m[k] = aws.String(v)
+		if input.Metadata == nil {
+			input.Metadata = make(map[string]*string)
 		}
-		input.Metadata = m
+		for k, v := range metadata.UserDefined {
+			input.Metadata[k] = aws.String(v)
+		}
 	}
 
 	uploaderOptsFn := func(u *s3manager.Uploader) {
