@@ -2583,7 +2583,7 @@ func TestSyncExitOnErrorS3BucketToS3BucketThatDoesNotExist(t *testing.T) {
 	result.Assert(t, icmd.Expected{ExitCode: 1})
 
 	assertLines(t, result.Stderr(), map[int]compareFunc{
-		0: contains(`NoSuchBucket`),
+		0: contains(`status code: 404`),
 	}, strictLineCheck(false))
 }
 

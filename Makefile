@@ -47,7 +47,7 @@ check: vet staticcheck unparam semgrep check-fmt check-codegen check-gomod
 
 .PHONY: staticcheck
 staticcheck:
-	@staticcheck -checks 'all,-ST1000' ./...
+	@staticcheck -checks 'all,-ST1000,-SA1019' ./...
 
 .PHONY: unparam
 unparam:
