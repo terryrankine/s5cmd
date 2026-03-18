@@ -55,6 +55,12 @@ const (
 	// Objects larger than this cannot be copied with a single CopyObject call.
 	defaultCopyPartSize int64 = 5 * 1024 * 1024 * 1024
 
+	// downloaderBufferSize is the buffer size for the S3 download manager.
+	downloaderBufferSize = 64 * 1024
+
+	// uploaderBufferSize is the buffer size for the S3 upload manager.
+	uploaderBufferSize = 512 * 1024
+
 	// the key of the object metadata which is used to handle retry decision on NoSuchUpload error
 	metadataKeyRetryID = "s5cmd-upload-retry-id"
 )
@@ -109,10 +115,15 @@ func newS3Storage(ctx context.Context, opts Options) (*S3, error) {
 		return nil, err
 	}
 
+	downloader := s3manager.NewDownloader(awsSession)
+	downloader.BufferProvider = s3manager.NewPooledBufferedWriterReadFromProvider(downloaderBufferSize)
+	uploader := s3manager.NewUploader(awsSession)
+	uploader.BufferProvider = s3manager.NewBufferedReadSeekerWriteToPool(uploaderBufferSize)
+
 	return &S3{
 		api:                    s3.New(awsSession),
-		downloader:             s3manager.NewDownloader(awsSession),
-		uploader:               s3manager.NewUploader(awsSession),
+		downloader:             downloader,
+		uploader:               uploader,
 		endpointURL:            endpointURL,
 		dryRun:                 opts.DryRun,
 		useListObjectsV1:       opts.UseListObjectsV1,
@@ -307,6 +318,10 @@ func (s *S3) listObjectsV2(ctx context.Context, url *url.URL) <-chan *Object {
 		Bucket:       aws.String(url.Bucket),
 		Prefix:       aws.String(url.Prefix),
 		RequestPayer: s.RequestPayer(),
+	}
+
+	if url.StartAfter != "" {
+		listInput.SetStartAfter(url.StartAfter)
 	}
 
 	if url.Delimiter != "" {
