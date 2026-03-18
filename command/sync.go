@@ -130,6 +130,8 @@ type Sync struct {
 	delete      bool
 	sizeOnly    bool
 	exitOnError bool
+	exclude     []string
+	include     []string
 
 	// s3 options
 	storageOpts storage.Options
@@ -154,6 +156,8 @@ func NewSync(c *cli.Context) Sync {
 		delete:      c.Bool("delete"),
 		sizeOnly:    c.Bool("size-only"),
 		exitOnError: c.Bool("exit-on-error"),
+		exclude:     c.StringSlice("exclude"),
+		include:     c.StringSlice("include"),
 
 		// flags
 		followSymlinks: !c.Bool("no-follow-symlinks"),
@@ -524,6 +528,10 @@ func (s Sync) planRun(
 	go func() {
 		defer wg.Done()
 		if s.delete {
+			// Build exclude/include patterns for filtering deletes
+			excludePatterns, _ := createRegexFromWildcard(s.exclude)
+			includePatterns, _ := createRegexFromWildcard(s.include)
+
 			// unfortunately we need to read them all!
 			// or rewrite generateCommand function?
 			dstURLs := make([]*url.URL, 0, extsortChunkSize)
@@ -537,6 +545,13 @@ func (s Sync) planRun(
 					if !ok {
 						done = true
 					} else {
+						// Respect --exclude/--include: don't delete excluded objects (#815)
+						if len(excludePatterns) > 0 && isURLMatched(excludePatterns, d.Path, dsturl.Prefix) {
+							continue
+						}
+						if len(includePatterns) > 0 && !isURLMatched(includePatterns, d.Path, dsturl.Prefix) {
+							continue
+						}
 						dstURLs = append(dstURLs, d)
 					}
 				}
