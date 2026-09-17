@@ -1,5 +1,7 @@
 version: 2
 
+project_name: s5cmd
+
 before:
   hooks:
     - make build
@@ -60,7 +62,9 @@ changelog:
       - Merge branch
 
 brews:
-  - repository:
+  - # Only the upstream project can push to its tap; forks skip the upload.
+    skip_upload: '{{ ne (envOrDefault "GITHUB_REPOSITORY_OWNER" "peak") "peak" }}'
+    repository:
       owner: peak
       name: homebrew-tap
     directory: Formula

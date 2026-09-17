@@ -2,8 +2,6 @@ module github.com/peak/s5cmd/v2
 
 go 1.24.0
 
-toolchain go1.25.5
-
 require (
 	github.com/aws/aws-sdk-go v1.55.5
 	github.com/cheggaaa/pb/v3 v3.1.4
@@ -18,7 +16,7 @@ require (
 	github.com/urfave/cli/v2 v2.11.2
 	go.uber.org/mock v0.4.0
 	gotest.tools/v3 v3.0.3
-	honnef.co/go/tools v0.6.0-0.dev
+	honnef.co/go/tools v0.6.1
 	mvdan.cc/unparam v0.0.0-20251027182757-5beb8c8f8f15
 )
 

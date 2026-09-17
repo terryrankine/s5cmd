@@ -7,13 +7,16 @@ jobs:
   gcs_test:
     name: gcs-test
     runs-on: ubuntu-latest
+    env:
+      # Job-level env is visible to step `if`; step-level env is not.
+      HAS_GCS_SECRETS: ${{ secrets.S5CMD_GCS_ACCESS_KEY_ID != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: 1.24.x
+          go-version: 1.25.x
       - name: Run GCS tests
-        if: env.S5CMD_ACCESS_KEY_ID != ''
+        if: env.HAS_GCS_SECRETS == 'true'
         run: make test_without_race
         env:
           S5CMD_ACCESS_KEY_ID: ${{ secrets.S5CMD_GCS_ACCESS_KEY_ID }}
@@ -23,10 +26,8 @@ jobs:
           S5CMD_REGION: ${{ secrets.S5CMD_GCS_REGION }}
           S5CMD_I_KNOW_WHAT_IM_DOING: 1
       - name: Skip GCS tests
-        if: env.S5CMD_ACCESS_KEY_ID == ''
+        if: env.HAS_GCS_SECRETS != 'true'
         run: echo "GCS secrets not configured, skipping"
-        env:
-          S5CMD_ACCESS_KEY_ID: ${{ secrets.S5CMD_GCS_ACCESS_KEY_ID }}
 
   goreleaser:
     runs-on: ubuntu-latest
@@ -40,12 +41,12 @@ jobs:
         name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: 1.24.x
+          go-version: 1.25.x
       -
         name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
-          version: latest
+          version: '~> v2'
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GORELEASER_TOKEN }}
