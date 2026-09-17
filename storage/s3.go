@@ -630,67 +630,8 @@ func (s *S3) multipartCopy(ctx context.Context, from *url.URL, originalInput *s3
 	}
 	objectSize := aws.Int64Value(headOutput.ContentLength)
 
-	createInput := &s3.CreateMultipartUploadInput{
-		Bucket:       originalInput.Bucket,
-		Key:          originalInput.Key,
-		RequestPayer: s.RequestPayer(),
-	}
-	if originalInput.StorageClass != nil {
-		createInput.StorageClass = originalInput.StorageClass
-	}
-	if originalInput.ACL != nil {
-		createInput.ACL = originalInput.ACL
-	}
-	if originalInput.CacheControl != nil {
-		createInput.CacheControl = originalInput.CacheControl
-	} else if headOutput.CacheControl != nil {
-		createInput.CacheControl = headOutput.CacheControl
-	}
-	if originalInput.ServerSideEncryption != nil {
-		createInput.ServerSideEncryption = originalInput.ServerSideEncryption
-	} else if headOutput.ServerSideEncryption != nil {
-		createInput.ServerSideEncryption = headOutput.ServerSideEncryption
-	}
-	if originalInput.SSEKMSKeyId != nil {
-		createInput.SSEKMSKeyId = originalInput.SSEKMSKeyId
-	}
-	if originalInput.ContentEncoding != nil {
-		createInput.ContentEncoding = originalInput.ContentEncoding
-	} else if headOutput.ContentEncoding != nil {
-		createInput.ContentEncoding = headOutput.ContentEncoding
-	}
-	if originalInput.ContentDisposition != nil {
-		createInput.ContentDisposition = originalInput.ContentDisposition
-	} else if headOutput.ContentDisposition != nil {
-		createInput.ContentDisposition = headOutput.ContentDisposition
-	}
-	if originalInput.ContentType != nil {
-		createInput.ContentType = originalInput.ContentType
-	} else if headOutput.ContentType != nil {
-		createInput.ContentType = headOutput.ContentType
-	}
-	if originalInput.Expires != nil {
-		createInput.Expires = originalInput.Expires
-	} else if headOutput.Expires != nil {
-		if t, err := time.Parse(time.RFC1123, aws.StringValue(headOutput.Expires)); err == nil {
-			createInput.Expires = aws.Time(t)
-		}
-	}
-
-	// Preserve source object's user-defined metadata
-	if len(headOutput.Metadata) > 0 {
-		merged := make(map[string]*string, len(headOutput.Metadata))
-		for k, v := range headOutput.Metadata {
-			merged[k] = v
-		}
-		// Let explicitly-set metadata from originalInput take precedence
-		for k, v := range originalInput.Metadata {
-			merged[k] = v
-		}
-		createInput.Metadata = merged
-	} else if len(originalInput.Metadata) > 0 {
-		createInput.Metadata = originalInput.Metadata
-	}
+	createInput := newMultipartCopyInput(originalInput, headOutput)
+	createInput.RequestPayer = s.RequestPayer()
 
 	createOutput, err := s.api.CreateMultipartUploadWithContext(ctx, createInput)
 	if err != nil {
@@ -754,6 +695,67 @@ func (s *S3) multipartCopy(ctx context.Context, from *url.URL, originalInput *s3
 	}
 
 	return nil
+}
+
+// newMultipartCopyInput builds the CreateMultipartUpload request for a
+// multipart copy. CopyObject applies MetadataDirective server-side, but
+// UploadPartCopy has no such option, so it is emulated here: with REPLACE
+// only the request's headers and metadata are used; otherwise the source
+// object's are carried over and any explicitly set request values win.
+func newMultipartCopyInput(req *s3.CopyObjectInput, src *s3.HeadObjectOutput) *s3.CreateMultipartUploadInput {
+	in := &s3.CreateMultipartUploadInput{
+		Bucket:               req.Bucket,
+		Key:                  req.Key,
+		StorageClass:         req.StorageClass,
+		ACL:                  req.ACL,
+		CacheControl:         req.CacheControl,
+		ServerSideEncryption: req.ServerSideEncryption,
+		SSEKMSKeyId:          req.SSEKMSKeyId,
+		ContentEncoding:      req.ContentEncoding,
+		ContentDisposition:   req.ContentDisposition,
+		ContentType:          req.ContentType,
+		Expires:              req.Expires,
+		Metadata:             req.Metadata,
+	}
+
+	if aws.StringValue(req.MetadataDirective) == s3.MetadataDirectiveReplace {
+		return in
+	}
+
+	if in.CacheControl == nil {
+		in.CacheControl = src.CacheControl
+	}
+	if in.ServerSideEncryption == nil {
+		in.ServerSideEncryption = src.ServerSideEncryption
+		in.SSEKMSKeyId = src.SSEKMSKeyId
+	}
+	if in.ContentEncoding == nil {
+		in.ContentEncoding = src.ContentEncoding
+	}
+	if in.ContentDisposition == nil {
+		in.ContentDisposition = src.ContentDisposition
+	}
+	if in.ContentType == nil {
+		in.ContentType = src.ContentType
+	}
+	if in.Expires == nil && src.Expires != nil {
+		if t, err := time.Parse(time.RFC1123, aws.StringValue(src.Expires)); err == nil {
+			in.Expires = aws.Time(t)
+		}
+	}
+
+	if len(src.Metadata) > 0 {
+		merged := make(map[string]*string, len(src.Metadata)+len(req.Metadata))
+		for k, v := range src.Metadata {
+			merged[k] = v
+		}
+		for k, v := range req.Metadata {
+			merged[k] = v
+		}
+		in.Metadata = merged
+	}
+
+	return in
 }
 
 // Read fetches the remote object and returns its contents as an io.ReadCloser.

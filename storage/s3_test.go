@@ -1485,3 +1485,98 @@ func TestIsCopySourceTooLargeError(t *testing.T) {
 		})
 	}
 }
+
+func TestNewMultipartCopyInput(t *testing.T) {
+	src := &s3.HeadObjectOutput{
+		CacheControl:         aws.String("max-age=60"),
+		ContentType:          aws.String("text/plain"),
+		ContentEncoding:      aws.String("gzip"),
+		ContentDisposition:   aws.String("inline"),
+		ServerSideEncryption: aws.String(s3.ServerSideEncryptionAwsKms),
+		SSEKMSKeyId:          aws.String("src-kms-key"),
+		Expires:              aws.String("Wed, 21 Oct 2015 07:28:00 GMT"),
+		Metadata: map[string]*string{
+			"Owner": aws.String("src"),
+			"Env":   aws.String("prod"),
+		},
+	}
+
+	t.Run("copy directive carries source values and request overrides win", func(t *testing.T) {
+		req := &s3.CopyObjectInput{
+			Bucket:       aws.String("bucket"),
+			Key:          aws.String("key"),
+			StorageClass: aws.String(s3.StorageClassStandardIa),
+			ContentType:  aws.String("application/json"),
+			Metadata: map[string]*string{
+				"Owner":            aws.String("req"),
+				metadataKeyRetryID: aws.String("retry-1"),
+			},
+		}
+
+		got := newMultipartCopyInput(req, src)
+
+		want := &s3.CreateMultipartUploadInput{
+			Bucket:               aws.String("bucket"),
+			Key:                  aws.String("key"),
+			StorageClass:         aws.String(s3.StorageClassStandardIa),
+			CacheControl:         aws.String("max-age=60"),
+			ContentType:          aws.String("application/json"),
+			ContentEncoding:      aws.String("gzip"),
+			ContentDisposition:   aws.String("inline"),
+			ServerSideEncryption: aws.String(s3.ServerSideEncryptionAwsKms),
+			SSEKMSKeyId:          aws.String("src-kms-key"),
+			Expires:              aws.Time(time.Date(2015, time.October, 21, 7, 28, 0, 0, time.UTC)),
+			Metadata: map[string]*string{
+				"Owner":            aws.String("req"),
+				"Env":              aws.String("prod"),
+				metadataKeyRetryID: aws.String("retry-1"),
+			},
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("(-want +got):\n%v", diff)
+		}
+	})
+
+	t.Run("replace directive ignores source values", func(t *testing.T) {
+		req := &s3.CopyObjectInput{
+			Bucket:            aws.String("bucket"),
+			Key:               aws.String("key"),
+			MetadataDirective: aws.String(s3.MetadataDirectiveReplace),
+			ContentType:       aws.String("application/json"),
+			Metadata: map[string]*string{
+				"Owner": aws.String("req"),
+			},
+		}
+
+		got := newMultipartCopyInput(req, src)
+
+		want := &s3.CreateMultipartUploadInput{
+			Bucket:      aws.String("bucket"),
+			Key:         aws.String("key"),
+			ContentType: aws.String("application/json"),
+			Metadata: map[string]*string{
+				"Owner": aws.String("req"),
+			},
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("(-want +got):\n%v", diff)
+		}
+	})
+
+	t.Run("request encryption replaces source encryption entirely", func(t *testing.T) {
+		req := &s3.CopyObjectInput{
+			Bucket:               aws.String("bucket"),
+			Key:                  aws.String("key"),
+			ServerSideEncryption: aws.String(s3.ServerSideEncryptionAes256),
+		}
+
+		got := newMultipartCopyInput(req, src)
+
+		if aws.StringValue(got.ServerSideEncryption) != s3.ServerSideEncryptionAes256 {
+			t.Errorf("expected AES256, got %v", aws.StringValue(got.ServerSideEncryption))
+		}
+		if got.SSEKMSKeyId != nil {
+			t.Errorf("expected no KMS key when request sets a non-KMS encryption, got %v", aws.StringValue(got.SSEKMSKeyId))
+		}
+	})
+}
