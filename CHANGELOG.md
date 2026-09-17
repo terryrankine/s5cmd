@@ -1,4 +1,13 @@
 # Changelog
+## Unreleased
+
+#### Bugfixes
+- Fixed `--dry-run` downloads closing stdin: the placeholder file handle wrapped fd 0, so `s5cmd --dry-run run < commands` hung after the first download. Regression in v2.4.0. (upstream [#879](https://github.com/peak/s5cmd/pull/879))
+- Fixed `sync --delete` with `--exclude`/`--include`: filters were re-applied by the generated `rm --raw` against full keys, so `folder/*` never matched and `--include` deleted nothing. ([#815](https://github.com/peak/s5cmd/issues/815), upstream [#883](https://github.com/peak/s5cmd/pull/883))
+- Fixed `--log-file` silently falling back to stdout when the file cannot be opened; the command now fails with the reason.
+- Fixed `--no-clobber`, `--if-size-differ` and `--if-source-newer` sending the destination HEAD to the source region when `--destination-region` differs. ([#839](https://github.com/peak/s5cmd/issues/839), same as upstream [#862](https://github.com/peak/s5cmd/pull/862))
+- Fixed multipart copy (>5 GiB) ignoring `--metadata-directive REPLACE` and dropping the source SSE-KMS key.
+
 ## v2.4.0 - 18 Mar 2026
 
 #### Features

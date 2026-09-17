@@ -1,8 +1,8 @@
 # Issue Tracker — peak/s5cmd Open Issues vs fix/apply-upstream-prs Branch
 
-Generated: 2026-03-18
-Branch: `fix/apply-upstream-prs` on `terryrankine/s5cmd`
-Fork PR: https://github.com/terryrankine/s5cmd/tree/fix/apply-upstream-prs
+Generated: 2026-03-18. Updated: 2026-09-17.
+Branch: `master` on `terryrankine/s5cmd` (released as v2.4.0; fixes below marked *unreleased* are on `master` after v2.4.0)
+Upstream: everything was bundled in [#859](https://github.com/peak/s5cmd/pull/859) (no maintainer review in 6 months). Now being re-submitted as small PRs: [#879](https://github.com/peak/s5cmd/pull/879)–[#885](https://github.com/peak/s5cmd/pull/885). Work list: `docs/backlog.md`.
 
 ## FIXED — Issues resolved by our branch
 
@@ -25,7 +25,9 @@ Fork PR: https://github.com/terryrankine/s5cmd/tree/fix/apply-upstream-prs
 | [#824](https://github.com/peak/s5cmd/issues/824) | sync silently fails in wrong region | `8078699` + `2589055` | Fixed in our fork — sync region overrides + improved error handling. See commits `8078699`, `2589055`. |
 | [#827](https://github.com/peak/s5cmd/issues/827) | --exclude does not work on file-names as expected | `d04203c` fix: filter order | Fixed in our fork — exclude/include filters now checked before non-regular file rejection. See commit `d04203c`. |
 | [#835](https://github.com/peak/s5cmd/issues/835) | Cannot upgrade build later than Golang 1.22.x | `9080e28` Go 1.24 upgrade | Fixed in our fork — bumped go.mod to Go 1.24, extsort to v1.4.2. See commit `9080e28`. |
-| [#839](https://github.com/peak/s5cmd/issues/839) | shouldOverride should match SetRegion logic | `d53ea47` + `8078699` | Fixed in our fork — nil deref guard in shouldOverride + sync region overrides. See commits `d53ea47`, `8078699`. |
+| [#839](https://github.com/peak/s5cmd/issues/839) | shouldOverride should match SetRegion logic | `d53ea47` + `8078699` + *unreleased* dst-region fix | Fixed in our fork — nil deref guard, sync region overrides, and (after v2.4.0) shouldOverride now HEADs the destination with `--destination-region`. Same as upstream [#862](https://github.com/peak/s5cmd/pull/862). |
+| [#815](https://github.com/peak/s5cmd/issues/815) | sync --delete does not respect --exclude | *unreleased*, upstream [#883](https://github.com/peak/s5cmd/pull/883) | Fixed in our fork — filters applied relative to the destination prefix in planRun, and no longer re-applied by the generated `rm --raw`. Two e2e tests. |
+| [#817](https://github.com/peak/s5cmd/issues/817) | Humanize ls no suffix for bytes | `de03428`, upstream [#884](https://github.com/peak/s5cmd/pull/884) | Fixed in our fork — sizes below 1K now print as `512B`. |
 
 ## IMPROVED — Issues partially addressed or likely improved
 
@@ -64,7 +66,7 @@ Fork PR: https://github.com/terryrankine/s5cmd/tree/fix/apply-upstream-prs
 |-------|-------|----------|
 | [#517](https://github.com/peak/s5cmd/issues/517) | Incorrect results for keys ending in `/` | Bug |
 | [#649](https://github.com/peak/s5cmd/issues/649) | sync --stat does not report correct rm quantity | Bug |
-| [#707](https://github.com/peak/s5cmd/issues/707) | rm doesn't delete 0-byte folder placeholders | Bug |
+| [#707](https://github.com/peak/s5cmd/issues/707) | rm doesn't delete 0-byte folder placeholders | Bug — fork commit `4e631d3` is unreachable: validation rejects `s3://b/dir/` before it runs. Adopt upstream [#861](https://github.com/peak/s5cmd/pull/861) instead. |
 | [#718](https://github.com/peak/s5cmd/issues/718) | --no-clobber with cp works wrong | Bug |
 | [#720](https://github.com/peak/s5cmd/issues/720) | Strange behaviour of sync | Bug |
 | [#744](https://github.com/peak/s5cmd/issues/744) | s5cmd does not honor umask settings | Bug |
@@ -73,10 +75,8 @@ Fork PR: https://github.com/terryrankine/s5cmd/tree/fix/apply-upstream-prs
 | [#755](https://github.com/peak/s5cmd/issues/755) | ls yields both relative and absolute paths | Bug |
 | [#800](https://github.com/peak/s5cmd/issues/800) | input/output error with cp symlink | Bug |
 | [#810](https://github.com/peak/s5cmd/issues/810) | no match found for local destination | Bug |
-| [#815](https://github.com/peak/s5cmd/issues/815) | sync --delete does not respect --exclude | Bug |
-| [#817](https://github.com/peak/s5cmd/issues/817) | Humanize ls no suffix for bytes | Bug |
 | [#826](https://github.com/peak/s5cmd/issues/826) | cp fails with chmod operation not permitted | Bug |
-| [#834](https://github.com/peak/s5cmd/issues/834) | rm does not delete DIROBJ objects | Bug |
+| [#834](https://github.com/peak/s5cmd/issues/834) | rm does not delete DIROBJ objects | Bug — same as #707. |
 | [#845](https://github.com/peak/s5cmd/issues/845) | cp Timezone Issue | Bug |
 | [#852](https://github.com/peak/s5cmd/issues/852) | sync --delete not deleting removed files | Bug |
 
@@ -166,7 +166,7 @@ Fork PR: https://github.com/terryrankine/s5cmd/tree/fix/apply-upstream-prs
 ## Stats
 
 - **Total open issues:** 136
-- **Fixed by our branch:** 18
+- **Fixed by our branch:** 20
 - **Improved/partially addressed:** 25
-- **Not fixed:** 73
+- **Not fixed:** 71
 - **Questions (not actionable):** 20
