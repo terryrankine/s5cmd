@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -150,6 +151,14 @@ func TestAppProxy(t *testing.T) {
 			flag: "--no-verify-ssl",
 		},
 	}
+	// The fake S3 server is addressed as "localhost." so that Go's proxy
+	// logic does not bypass the proxy for loopback hosts. Not every resolver
+	// handles the trailing dot (e.g. inside Docker), so skip rather than fail
+	// with a confusing connection error.
+	if _, err := net.LookupHost("localhost."); err != nil {
+		t.Skipf("skipping: %q does not resolve here: %v", "localhost.", err)
+	}
+
 	for _, tc := range testcases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -160,20 +169,17 @@ func TestAppProxy(t *testing.T) {
 
 			// set endpoint scheme to 'http'
 			if os.Getenv(s5cmdTestEndpointEnv) != "" {
-				origEndpoint := os.Getenv(s5cmdTestEndpointEnv)
-				endpoint, err := url.Parse(origEndpoint)
+				endpoint, err := url.Parse(os.Getenv(s5cmdTestEndpointEnv))
 				if err != nil {
 					t.Fatal(err)
 				}
 				endpoint.Scheme = "http"
-				os.Setenv(s5cmdTestEndpointEnv, endpoint.String())
-
-				defer func() {
-					os.Setenv(s5cmdTestEndpointEnv, origEndpoint)
-				}()
+				t.Setenv(s5cmdTestEndpointEnv, endpoint.String())
 			}
 
-			os.Setenv("http_proxy", pxyURL)
+			// t.Setenv restores the value when the subtest ends. os.Setenv
+			// leaked a dead proxy URL into every later test's s5cmd process.
+			t.Setenv("http_proxy", pxyURL)
 
 			_, s5cmd := setup(t, withProxy())
 

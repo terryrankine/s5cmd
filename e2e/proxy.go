@@ -60,7 +60,9 @@ func (p *httpProxy) ServeHTTP(wr http.ResponseWriter, req *http.Request) {
 
 	resp, err := client.Do(req)
 	if err != nil {
+		atomic.AddInt64(&p.errorReqs, 1)
 		http.Error(wr, "Server Error", http.StatusInternalServerError)
+		return
 	}
 	defer resp.Body.Close()
 
