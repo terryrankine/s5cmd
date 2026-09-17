@@ -886,7 +886,13 @@ func (c Copy) shouldOverride(ctx context.Context, srcurl *url.URL, dsturl *url.U
 		return fmt.Errorf("source object %q not found", srcurl)
 	}
 
-	dstClient, err := storage.NewClient(ctx, dsturl, c.storageOpts)
+	// c.storageOpts carries the source region at this point (see Run), so
+	// the destination HEAD must use the destination region override.
+	dstOpts := c.storageOpts
+	if c.dstRegion != "" {
+		dstOpts.SetRegion(c.dstRegion)
+	}
+	dstClient, err := storage.NewClient(ctx, dsturl, dstOpts)
 	if err != nil {
 		return err
 	}
