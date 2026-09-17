@@ -17,48 +17,61 @@ func TestFilesystemCreateDryRun(t *testing.T) {
 	t.Parallel()
 
 	fs := &Filesystem{dryRun: true}
-
 	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "should-not-exist.txt")
 
-	// Create should return a non-nil file and no error
-	f, err := fs.Create(path)
-	if err != nil {
-		t.Fatalf("Create() returned error: %v", err)
-	}
-	if f == nil {
-		t.Fatal("Create() returned nil file")
-	}
-
-	// The returned file should reference os.DevNull
-	if f.Name() != os.DevNull {
-		t.Fatalf("expected file name %q, got %q", os.DevNull, f.Name())
-	}
-
-	// Verify no actual file was created on disk
-	_, err = os.Stat(path)
-	if err == nil {
-		t.Fatal("expected file to not exist on disk during dry run, but it does")
-	}
-	if !os.IsNotExist(err) {
-		t.Fatalf("expected IsNotExist error, got: %v", err)
+	testcases := []struct {
+		name   string
+		create func() (*os.File, error)
+	}{
+		{
+			name: "Create",
+			create: func() (*os.File, error) {
+				return fs.Create(filepath.Join(tmpDir, "should-not-exist.txt"))
+			},
+		},
+		{
+			name: "CreateTemp",
+			create: func() (*os.File, error) {
+				return fs.CreateTemp(tmpDir, "dryrun-*.txt")
+			},
+		},
 	}
 
-	// Test CreateTemp with dryRun
-	tf, err := fs.CreateTemp(tmpDir, "dryrun-*.txt")
-	if err != nil {
-		t.Fatalf("CreateTemp() returned error: %v", err)
-	}
-	if tf == nil {
-		t.Fatal("CreateTemp() returned nil file")
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := tc.create()
+			if err != nil {
+				t.Fatalf("%s() returned error: %v", tc.name, err)
+			}
+			if f == nil {
+				t.Fatalf("%s() returned nil file", tc.name)
+			}
+
+			if f.Name() != os.DevNull {
+				t.Fatalf("expected file name %q, got %q", os.DevNull, f.Name())
+			}
+
+			// the handle must not alias stdin, otherwise closing it would
+			// close stdin as well.
+			if f.Fd() == 0 {
+				t.Fatal("expected file descriptor other than stdin")
+			}
+
+			if _, err := f.Write([]byte("content")); err != nil {
+				t.Fatalf("Write() returned error: %v", err)
+			}
+
+			if err := f.Close(); err != nil {
+				t.Fatalf("Close() returned error: %v", err)
+			}
+
+			if _, err := os.Stdin.Stat(); err != nil {
+				t.Fatalf("stdin is not usable after Close(): %v", err)
+			}
+		})
 	}
 
-	// The returned file should reference os.DevNull
-	if tf.Name() != os.DevNull {
-		t.Fatalf("expected temp file name %q, got %q", os.DevNull, tf.Name())
-	}
-
-	// Verify no temp file was created in the directory
+	// no file should be created on disk during dry run
 	entries, err := os.ReadDir(tmpDir)
 	if err != nil {
 		t.Fatalf("ReadDir failed: %v", err)
