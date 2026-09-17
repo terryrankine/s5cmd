@@ -11,8 +11,8 @@ jobs:
     strategy:
       matrix:
         go-version:
-          - 1.25.x
-          - 1.24.x
+          - 1.27.x  # current
+          - 1.24.x  # go.mod minimum
         os:
           - macos
           - ubuntu
@@ -32,8 +32,8 @@ jobs:
     strategy:
       matrix:
         go-version:
-          - 1.25.x
-          - 1.24.x
+          - 1.27.x  # current
+          - 1.24.x  # go.mod minimum
         os:
           - macos
           - ubuntu
@@ -69,8 +69,10 @@ jobs:
     strategy:
       matrix:
         go-version:
+          # staticcheck is pinned in go.mod (internal/tools); v0.6.x is the
+          # last line that keeps the module at go 1.24 and it understands
+          # Go 1.24-1.25 only. Newer staticcheck raises the module minimum.
           - 1.25.x
-          - 1.24.x
         os:
           - ubuntu
 
