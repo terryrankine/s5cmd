@@ -100,3 +100,22 @@ New findings while building the PRs:
 - The copy side of sync has the same raw-prefix limitation (`cp --raw --exclude "sub/*"` matches full path). Separate issue; not fixed.
 - extsort v1.0.2 sends a nil error on context cancel; upstream's `printError(nil)` would nil-deref. P4 guards it.
 - #707/#834: fork commit `4e631d3` is dead code — `validateRMCommand` rejects `s3://b/dir/` first. Adopt #861.
+
+## Runner and test review (2026-09-17, fork PR #1)
+
+Fixed: goreleaser pushing to `peak/homebrew-tap` (every v2.4.0 run failed after upload); docker pushing to Docker Hub with upstream's secrets (now GHCR on forks); `toolchain go1.25.5` making the whole matrix run 1.25.5; GCS test gate that could never fire; frozen bitnami MinIO image; `TestAppProxy` leaking `http_proxy` into every later test; nil-deref in the test proxy.
+
+Assumptions and edge cases checked:
+
+- **Go matrix.** Sept 2026: current is 1.27, floor is 1.24. Test both. `qa` is pinned to 1.25 because staticcheck is vendored via `internal/tools`: v0.6.x is the last line that keeps `go 1.24` in go.mod (v0.8 forces `go 1.26`) and it can't read Go ≥1.26 export data. To lint on current Go, move tool installs out of go.mod.
+- **GHCR visibility.** First push to `ghcr.io/terryrankine/s5cmd` creates a *private* package. Make it public once in package settings or nobody can pull it.
+- **Release chain.** goreleaser creates a *draft* release; docker runs on `release: published`, i.e. only after someone publishes the draft. goreleaser does not `need` the GCS job, so a GCS failure never blocks a release (pre-existing).
+- **MinIO.** Pinned `quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z`; `minio/minio` on Docker Hub is gone. Only the 3 `select` tests use it. The test job on ubuntu cannot silently skip them (env is set), so a pass means they ran.
+- **`t.Setenv`** panics if the test is parallel — TestAppProxy and its subtests are sequential; adding `t.Parallel()` there would fail loudly rather than leak again.
+- **`localhost.`** Go bypasses proxies for `localhost` and loopback IPs; the trailing dot defeats that. Resolvers that don't handle it (Docker) now skip. If it resolves to `::1` first, the dialer falls back to 127.0.0.1.
+- **P1 dry-run + mv.** All mutating storage ops (`Copy`, `Put`, `doDelete` for `Delete`/`MultiDelete`, fs `Delete`/`Rename`/`MkdirAll`) have dry-run guards; the new `/dev/null` handle is only written by nothing and closed once.
+- **P2 `--if-size-differ` + `--if-source-newer`.** The newer check overrides the size check (last check wins). Pre-existing, unchanged.
+- **P4 cancellation.** `defer cancel()` in sync fires after `NewRun` returns, by which point every channel is drained, so nothing leaks on the happy path. On the early-error path only the `NewClient` failures return, before any goroutine starts. `shouldStopSync` on `RequestError` is *safer* with `--delete`: a partial source listing plus delete would remove destination objects that exist in the source.
+- **P5 local destination.** `sync --delete --exclude` S3→local was untested; added `TestSyncS3BucketToLocalWithDeleteAndExcludeFilter` (fails on v2.4.0, passes now). The *copy* side still has the raw-prefix limitation: `--exclude "sub/*"` does not stop `sub/new.log` being uploaded. Separate fix.
+- **Dockerfile.** `golang:1.24-alpine` was an EOL toolchain for the release image; now 1.27. `alpine:3.20` reaches EOL Nov 2026 — bump before then.
+- **Windows dev.** 9 symlink e2e tests fail without Developer Mode; CI's Windows runners have the privilege. Could `t.Skip` on `ERROR_PRIVILEGE_NOT_HELD`.
