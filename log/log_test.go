@@ -1,7 +1,9 @@
 package log
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -26,7 +28,9 @@ func TestInitWithLogFile(t *testing.T) {
 	// Re-create the outputCh since it may have been closed by a previous test.
 	outputCh = make(chan output, 10000)
 
-	Init("info", false, WithLogFile(tmpPath))
+	if err := Init("info", false, WithLogFile(tmpPath)); err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
 	Info(testMessage{msg: "hello from test"})
 	Close()
 
@@ -37,6 +41,21 @@ func TestInitWithLogFile(t *testing.T) {
 
 	if !strings.Contains(string(data), "hello from test") {
 		t.Fatalf("expected log file to contain 'hello from test', got: %s", string(data))
+	}
+}
+
+func TestInitWithLogFileOpenError(t *testing.T) {
+	// Re-create the outputCh since it may have been closed by a previous test.
+	outputCh = make(chan output, 10000)
+
+	badPath := filepath.Join(t.TempDir(), "missing-dir", "s5cmd.log")
+
+	err := Init("info", false, WithLogFile(badPath))
+	if err == nil {
+		t.Fatal("expected Init() to fail for an unwritable log file path")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected wrapped os.ErrNotExist, got: %v", err)
 	}
 }
 

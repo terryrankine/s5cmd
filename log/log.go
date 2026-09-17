@@ -22,9 +22,14 @@ var (
 )
 
 // Init inits global logger.
-func Init(level string, json bool, opts ...LoggerOption) {
+func Init(level string, json bool, opts ...LoggerOption) error {
+	logger, err := New(level, json, opts...)
+	if err != nil {
+		return err
+	}
 	closeOnce = sync.Once{}
-	global = New(level, json, opts...)
+	global = logger
+	return nil
 }
 
 // Trace prints message in trace mode.
@@ -68,22 +73,23 @@ func Close() {
 }
 
 // LoggerOption configures the Logger.
-type LoggerOption func(*Logger)
+type LoggerOption func(*Logger) error
 
 // WithLogFile sets the log output file. Both stdout and stderr messages
 // are redirected to this file.
 func WithLogFile(path string) LoggerOption {
-	return func(l *Logger) {
+	return func(l *Logger) error {
 		if path == "" {
-			return
+			return nil
 		}
 		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 		if err != nil {
-			return
+			return fmt.Errorf("log file: %w", err)
 		}
 		l.stdout = f
 		l.stderr = f
 		l.logFile = f
+		return nil
 	}
 }
 
@@ -98,7 +104,7 @@ type Logger struct {
 }
 
 // New creates new logger.
-func New(level string, json bool, opts ...LoggerOption) *Logger {
+func New(level string, json bool, opts ...LoggerOption) (*Logger, error) {
 	logLevel := LevelFromString(level)
 	logger := &Logger{
 		donech: make(chan struct{}),
@@ -108,10 +114,12 @@ func New(level string, json bool, opts ...LoggerOption) *Logger {
 		stderr: os.Stderr,
 	}
 	for _, opt := range opts {
-		opt(logger)
+		if err := opt(logger); err != nil {
+			return nil, err
+		}
 	}
 	go logger.out()
-	return logger
+	return logger, nil
 }
 
 // printf prints message according to the given level, message and std mode.

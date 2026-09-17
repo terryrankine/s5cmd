@@ -113,7 +113,9 @@ var app = &cli.App{
 		isStat := c.Bool("stat")
 		endpointURL := c.String("endpoint-url")
 
-		log.Init(logLevel, printJSON, log.WithLogFile(logFile))
+		if err := log.Init(logLevel, printJSON, log.WithLogFile(logFile)); err != nil {
+			return err
+		}
 		parallel.Init(workerCount)
 
 		if retryCount < 0 {
