@@ -4112,15 +4112,21 @@ func TestSyncLocalFolderWithDanglingSymlinkToS3Bucket(t *testing.T) {
 	t.Parallel()
 	requireSymlinks(t)
 
-	s3client, s5cmd := setup(t)
+	now := time.Now()
+	timeSource := newFixedTimeSource(now)
+	s3client, s5cmd := setup(t, withTimeSource(timeSource))
 
 	bucket := s3BucketFromTestName(t)
 	createBucket(t, s3client, bucket)
 
+	// the local files are older than the remote copy: S3 keeps whole
+	// seconds, so a file written in the same second as the upload would
+	// otherwise count as newer and be copied again.
+	timestamp := fs.WithTimestamps(now.Add(-time.Minute), now.Add(-time.Minute))
 	folderLayout := []fs.PathOp{
-		fs.WithFile("a.txt", "S: a"),
+		fs.WithFile("a.txt", "S: a", timestamp),
 		fs.WithSymlink("m.txt", "does-not-exist"),
-		fs.WithFile("z.txt", "S: z"),
+		fs.WithFile("z.txt", "S: z", timestamp),
 	}
 
 	workdir := fs.NewDir(t, "somedir", folderLayout...)
@@ -4160,15 +4166,19 @@ func TestSyncLocalFolderWithDanglingSymlinkToS3BucketWithDelete(t *testing.T) {
 	t.Parallel()
 	requireSymlinks(t)
 
-	s3client, s5cmd := setup(t)
+	now := time.Now()
+	timeSource := newFixedTimeSource(now)
+	s3client, s5cmd := setup(t, withTimeSource(timeSource))
 
 	bucket := s3BucketFromTestName(t)
 	createBucket(t, s3client, bucket)
 
+	// local files older than the remotes, see the test above
+	timestamp := fs.WithTimestamps(now.Add(-time.Minute), now.Add(-time.Minute))
 	folderLayout := []fs.PathOp{
-		fs.WithFile("a.txt", "S: a"),
+		fs.WithFile("a.txt", "S: a", timestamp),
 		fs.WithSymlink("m.txt", "does-not-exist"),
-		fs.WithFile("z.txt", "S: z"),
+		fs.WithFile("z.txt", "S: z", timestamp),
 	}
 
 	workdir := fs.NewDir(t, "somedir", folderLayout...)
