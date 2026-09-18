@@ -177,4 +177,7 @@ gotest.tools/v3/internal/cleanup
 gotest.tools/v3/internal/difflib
 gotest.tools/v3/internal/format
 gotest.tools/v3/internal/source
+# pgregory.net/rapid v1.3.0
+## explicit; go 1.23
+pgregory.net/rapid
 # github.com/igungor/gofakes3 => github.com/terryrankine/gofakes3 v0.0.19-0.20260917201636-2dee9d3285ae

@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kballard/go-shellquote"
 	"github.com/peak/s5cmd/v2/storage/url"
 	"github.com/urfave/cli/v2"
 )
@@ -72,7 +71,7 @@ func generateCommand(c *cli.Context, cmd string, defaultFlags map[string]interfa
 
 	var args []string
 	for _, url := range urls {
-		args = append(args, shellquote.Join(url.String()))
+		args = append(args, quoteArg(url.String()))
 	}
 
 	flags := []string{}
@@ -116,4 +115,24 @@ func generateCommand(c *cli.Context, cmd string, defaultFlags map[string]interfa
 
 	cmdCtx := cli.NewContext(c.App, flagset, c)
 	return strings.TrimSpace(commandFromContext(cmdCtx)), nil
+}
+
+// quoteArg quotes s for the command line that run parses with
+// shellquote.Split. A plain key is left bare, anything else is single-quoted
+// with embedded quotes escaped, so every byte of a key survives the trip:
+// shellquote.Join leaves some whitespace (a vertical tab, say) unquoted that
+// Split then splits on.
+func quoteArg(s string) string {
+	if s != "" && strings.IndexFunc(s, func(r rune) bool { return !isBareArgRune(r) }) < 0 {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func isBareArgRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	}
+	return strings.ContainsRune("_-./:=+@%,", r)
 }

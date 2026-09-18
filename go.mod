@@ -16,6 +16,7 @@ require (
 	github.com/urfave/cli/v2 v2.11.2
 	go.uber.org/mock v0.4.0
 	gotest.tools/v3 v3.0.3
+	pgregory.net/rapid v1.3.0
 )
 
 require (
