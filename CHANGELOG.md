@@ -1,5 +1,5 @@
 # Changelog
-## Unreleased
+## v2.4.2 - 18 Sep 2026
 
 #### Security
 - `cp`/`sync`: an object key that names the destination directory itself (e.g. `prefix/.`) is now rejected like a traversal. It used to be written as a temp file *beside* the destination and left there after the rename failed. Found by a security review of v2.4.1; attacker controls content, not the file name, and cannot overwrite existing files.
@@ -50,35 +50,44 @@
 
 ## v2.4.0 - 18 Mar 2026
 
-#### Features
-- Added automatic multipart copy for S3 objects larger than 5 GiB. ([#856](https://github.com/peak/s5cmd/issues/856))
-- Added Tencent Cloud Object Storage (COS) support. ([#809](https://github.com/peak/s5cmd/issues/809))
+First release of this fork. It takes upstream `peak/s5cmd` v2.3.0 (Dec 2024) and lands the 19 community pull requests that had been waiting there, plus 22 fixes found while integrating them. Everything was submitted back upstream as [peak/s5cmd#859](https://github.com/peak/s5cmd/pull/859).
 
-#### Improvements
-- Upgraded aws-sdk-go from v1.44.298 to v1.55.5, adding EKS Pod Identity support. ([#769](https://github.com/peak/s5cmd/issues/769))
-- Skip unnecessary HeadObject call when progress bar is disabled. ([#793](https://github.com/peak/s5cmd/issues/793))
-- Updated GitHub Actions to latest versions (checkout v4, setup-go v5).
-- Added codespell CI workflow for typo detection. ([#701](https://github.com/peak/s5cmd/issues/701))
-- Dropped Go 1.20 from CI matrix (EOL).
+> **Superseded by [v2.4.1](https://github.com/terryrankine/s5cmd/releases/tag/v2.4.1).** v2.4.0 has two bugs of its own — `s5cmd --dry-run run < commands` hangs after the first download, and `sync --delete --include` deletes nothing — and it is affected by the S3→local path-traversal reported upstream as [#872](https://github.com/peak/s5cmd/issues/872) (as is every upstream release). Please upgrade.
 
-#### Bugfixes
-- Fixed `--profile` flag to work with SSO and assume-role credential sources. ([#847](https://github.com/peak/s5cmd/issues/847))
-- Fixed nil pointer dereference in `shouldOverride` when stat returns no object. ([#838](https://github.com/peak/s5cmd/issues/838))
-- Fixed non-regular files producing errors when they match exclude patterns. ([#776](https://github.com/peak/s5cmd/issues/776))
-- Fixed shell quoting for object keys with special characters in sync commands. ([#761](https://github.com/peak/s5cmd/issues/761))
-- Fixed sync error handling to stop on network and serialization failures. ([#698](https://github.com/peak/s5cmd/issues/698))
-- Fixed expired session tokens to retry with fresh credentials instead of failing. ([#683](https://github.com/peak/s5cmd/issues/683))
-- Fixed MinIO CI image reference (`bitnami` → `bitnamilegacy`). ([#840](https://github.com/peak/s5cmd/issues/840))
-- Fixed missing subcommand in `cp` help example, typos, and documentation. ([#857](https://github.com/peak/s5cmd/issues/857), [#828](https://github.com/peak/s5cmd/issues/828), [#783](https://github.com/peak/s5cmd/issues/783), [#774](https://github.com/peak/s5cmd/issues/774), [#781](https://github.com/peak/s5cmd/issues/781))
-- Fixed data races in progress bar counter reads and statistics map access.
-- Fixed nil pointer dereference in metadata retry ID access.
-- Fixed resource leak in `Select()` when S3 API call fails.
-- Fixed `os.Exit(1)` in error goroutines replaced with context cancellation.
-- Fixed `panic()` in copy command replaced with error return.
-- Fixed dry-run mode returning zero-value file handles that panic on use.
-- Fixed argument count error message showing min instead of max.
-- Fixed context leak from missing `defer cancel()` in sync command.
-- Fixed test helper assigning access key ID as region value.
+#### New
+
+- **Automatic multipart copy for objects over 5 GiB.** `cp`/`mv` between buckets no longer fail with `EntityTooLarge`; the copy switches to `UploadPartCopy` transparently. ([#856](https://github.com/peak/s5cmd/pull/856), @l1n)
+- **`--log-progress`** — progress output that works in pipes and CI logs: one line every 2 s on stderr, no ANSI. ([#853](https://github.com/peak/s5cmd/pull/853), @ebrensi)
+- **`--log-file FILE`** — send all log output to a file instead of stdout/stderr. ([#723](https://github.com/peak/s5cmd/pull/723), @rkhomenko)
+- **`ls --start-after KEY`** — resume a listing after a given key. ([#850](https://github.com/peak/s5cmd/pull/850), @pashagolub)
+- **`--addressing-style path|virtual`** (also `S3_ADDRESSING_STYLE`) for S3-compatible endpoints that need virtual-host addressing. ([#795](https://github.com/peak/s5cmd/pull/795), @LinPr)
+- **Tencent Cloud COS** endpoints detected and addressed correctly. ([#809](https://github.com/peak/s5cmd/pull/809), @davidz-zzz)
+- **riscv64** binaries and Docker image. ([#842](https://github.com/peak/s5cmd/pull/842), @imguoguo)
+
+#### Fixed
+
+- **`--profile` with SSO and assume-role profiles** now works: the SDK's shared-config resolution is used instead of forcing static credentials. ([#847](https://github.com/peak/s5cmd/pull/847), @houseofeng; upstream issues #571, #709)
+- **Expired session tokens are retried** with refreshed credentials instead of aborting long syncs. ([#683](https://github.com/peak/s5cmd/pull/683); issues #526, #678)
+- **`sync` honours `--source-region` / `--destination-region`** and stops on network/serialization errors instead of continuing with a partial listing. ([#858](https://github.com/peak/s5cmd/pull/858), @gchait; [#698](https://github.com/peak/s5cmd/pull/698); issues #715, #816, #824)
+- **Object keys with quotes, spaces and `$`** no longer break the commands `sync` generates. ([#761](https://github.com/peak/s5cmd/pull/761), @briceflaceliere; issues #521, #728)
+- **Sockets, pipes and other non-regular files** that match `--exclude` no longer error. ([#776](https://github.com/peak/s5cmd/pull/776), @MqllR; issues #775, #827)
+- **`--no-clobber`/`--if-*` no longer crash** when the source object cannot be stat'ed. ([#838](https://github.com/peak/s5cmd/pull/838), @NeonWizard; issue #839)
+- Data races in the progress bar counters and `--stat` maps; nil-pointer dereferences in metadata handling; a leaked pipe in `select` on API error; `os.Exit` inside worker goroutines (which skipped log flushing) replaced with cancellation; a `panic` on an unexpected copy pair replaced with an error; the "expected at most N arguments" message reporting the wrong number.
+
+#### Under the hood
+
+- **Go 1.24** and **aws-sdk-go v1.55.5** — brings EKS Pod Identity credentials and clears the Go 1.22 CVEs. ([#769](https://github.com/peak/s5cmd/pull/769), @tisonet; issues #807, #820, #835)
+- `lanrat/extsort` v1.4.2 (fixes an OOM panic when disk is low during large syncs). ([#841](https://github.com/peak/s5cmd/pull/841), @NeonWizard)
+- Pooled upload/download buffers. ([#843](https://github.com/peak/s5cmd/pull/843), @kriakable)
+- One fewer `HeadObject` per object when the progress bar is off. ([#793](https://github.com/peak/s5cmd/pull/793), @ItielOlenick; issue #792)
+- CI: GitHub Actions bumped, codespell added, MinIO image reference fixed, Go 1.20 dropped. ([#780](https://github.com/peak/s5cmd/pull/780) @sturman, [#701](https://github.com/peak/s5cmd/pull/701) @yarikoptic, [#840](https://github.com/peak/s5cmd/pull/840) @NeonWizard)
+- Docs and help fixes. ([#857](https://github.com/peak/s5cmd/pull/857) @KasenX, [#828](https://github.com/peak/s5cmd/pull/828) @hxreborn, [#783](https://github.com/peak/s5cmd/pull/783) @bayandin, [#781](https://github.com/peak/s5cmd/pull/781) @dprestegard, [#774](https://github.com/peak/s5cmd/pull/774) @yarikoptic)
+
+#### Credits
+
+The features and most fixes are the work of the upstream contributors named above; this fork only integrated, tested and released them. Thanks to all of them.
+
+**Full diff:** [peak/s5cmd v2.3.0…terryrankine/s5cmd v2.4.0](https://github.com/peak/s5cmd/compare/v2.3.0...terryrankine:s5cmd:v2.4.0)
 
 ## v2.3.0 - 16 Dec 2024
 
