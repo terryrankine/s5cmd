@@ -5274,3 +5274,52 @@ func TestCopyMultipleS3ObjectsToAnotherBucketWithContentType(t *testing.T) {
 		assert.Assert(t, ensureS3Object(s3client, dstbucket, filename, content, ensureContentType("video/avi")))
 	}
 }
+
+// cp "dir/*" s3://bucket/ (an entry in the tree cannot be read)
+//
+// A dangling symlink used to end the walk of its top-level directory, so the
+// files after it were silently never copied (peak/s5cmd#720). The bad entry
+// is reported and the walk goes on.
+func TestCopyLocalTreeWithDanglingSymlinkToS3(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs a privilege on windows")
+	}
+
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	folderLayout := []fs.PathOp{
+		fs.WithDir("sub",
+			fs.WithFile("a.txt", "S: a"),
+			fs.WithSymlink("m.txt", "does-not-exist"),
+			fs.WithFile("z.txt", "S: z"),
+		),
+	}
+
+	workdir := fs.NewDir(t, "somedir", folderLayout...)
+	defer workdir.Remove()
+
+	src := filepath.ToSlash(workdir.Path())
+	dst := fmt.Sprintf("s3://%v/", bucket)
+
+	cmd := s5cmd("cp", src+"/*", dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: contains(`ERROR "cp %v/* %v": given object %v/sub/m.txt not found`, src, dst, src),
+	})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp %v/sub/a.txt %vsub/a.txt`, src, dst),
+		1: equals(`cp %v/sub/z.txt %vsub/z.txt`, src, dst),
+	}, sortInput(true))
+
+	assert.Assert(t, ensureS3Object(s3client, bucket, "sub/a.txt", "S: a"))
+	assert.Assert(t, ensureS3Object(s3client, bucket, "sub/z.txt", "S: z"))
+}
