@@ -35,12 +35,15 @@ test_without_race:
 	@S5CMD_BUILD_BINARY_WITHOUT_RACE_FLAG=1 go test -mod=vendor -count=1 ./...
 
 ##@ Bootstrap
+# Tools live in their own module (tools/go.mod) so their dependencies and Go
+# version requirement stay out of the main module and vendor tree. Run from
+# that directory with GOFLAGS cleared so a global -mod=vendor cannot leak in.
 # See following issues for why errors are ignored with `-e` flag:
 # 	* https://github.com/golang/go/issues/61857
 # 	* https://github.com/golang/go/issues/59186
 .PHONY: bootstrap
 bootstrap: ## Install tooling
-	@go install $$(go list -e -f '{{join .Imports " "}}' ./internal/tools/tools.go)
+	@cd tools && GOFLAGS= go install $$(GOFLAGS= go list -e -f '{{join .Imports " "}}' ./tools.go)
 
 .PHONY: check
 check: vet staticcheck unparam semgrep check-fmt check-codegen check-gomod
@@ -73,9 +76,10 @@ check-codegen: gogenerate ## Check generated code is up-to-date
 	@git diff --exit-code --
 
 .PHONY: check-gomod
-check-gomod: ## Check go.mod file
+check-gomod: ## Check go.mod files
 	@go mod tidy
-	@git diff --exit-code -- go.sum go.mod
+	@cd tools && GOFLAGS= go mod tidy
+	@git diff --exit-code -- go.sum go.mod tools/go.sum tools/go.mod
 
 .PHONY: gogenerate
 gogenerate:
