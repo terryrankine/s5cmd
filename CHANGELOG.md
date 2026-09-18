@@ -7,6 +7,7 @@
 - Fixed `--log-file` silently falling back to stdout when the file cannot be opened; the command now fails with the reason.
 - Fixed `--no-clobber`, `--if-size-differ` and `--if-source-newer` sending the destination HEAD to the source region when `--destination-region` differs. ([#839](https://github.com/peak/s5cmd/issues/839), same as upstream [#862](https://github.com/peak/s5cmd/pull/862))
 - Fixed multipart copy (>5 GiB) ignoring `--metadata-directive REPLACE` and dropping the source SSE-KMS key.
+- Fixed usage errors after a command name (e.g. `s5cmd ls --json ...`, where `--json` is a global flag) printing "Incorrect Usage" and the full help text to stdout; they now go to stderr with a pointer to the command's `--help`, so redirected stdout stays clean. The "too many open files" warning also moved to stderr. (upstream [#804](https://github.com/peak/s5cmd/issues/804))
 
 ## v2.4.0 - 18 Mar 2026
 

@@ -36,11 +36,12 @@ func TestSyncFailForNonsharedFlagsFromCopyCommand(t *testing.T) {
 	result := icmd.RunCmd(cmd)
 	result.Assert(t, icmd.Expected{ExitCode: 1})
 
-	// urfave.Cli prints the help text and error message to stdout
-	// if given flags in not present in command options.
-	assertLines(t, result.Stdout(), map[int]compareFunc{
+	// usage errors go to stderr; stdout must stay clean.
+	assertLines(t, result.Stdout(), map[int]compareFunc{})
+	assertLines(t, result.Stderr(), map[int]compareFunc{
 		0: equals("Incorrect Usage: flag provided but not defined: -n"),
-	}, strictLineCheck(false))
+		1: equals("See 's5cmd sync --help' for usage"),
+	})
 }
 
 // sync folder/ folder2/

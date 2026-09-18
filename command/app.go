@@ -159,15 +159,7 @@ var app = &cli.App{
 		parallel.Close()
 		log.Close()
 	},
-	OnUsageError: func(c *cli.Context, err error, isSubcommand bool) error {
-		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "%s %s\n", "Incorrect Usage:", err.Error())
-			_, _ = fmt.Fprintf(os.Stderr, "See 's5cmd --help' for usage\n")
-			return err
-		}
-
-		return nil
-	},
+	OnUsageError: onUsageError,
 	Action: func(c *cli.Context) error {
 		if c.Bool("install-completion") {
 			printAutocompletionInstructions(os.Getenv("SHELL"))
@@ -190,6 +182,45 @@ var app = &cli.App{
 		log.Close()
 		return nil
 	},
+}
+
+// onUsageError reports a usage error (unknown flag, bad flag value, ...) on
+// stderr and points the user at the relevant help. Without it, urfave/cli
+// prints "Incorrect Usage" and the full help text to stdout, which corrupts
+// redirected output such as `s5cmd ls --json s3://bucket > out.json`.
+func onUsageError(c *cli.Context, err error, _ bool) error {
+	if err == nil {
+		return nil
+	}
+
+	_, _ = fmt.Fprintf(c.App.ErrWriter, "Incorrect Usage: %v\n", err)
+	_, _ = fmt.Fprintf(c.App.ErrWriter, "See '%s --help' for usage\n", helpCommandFromContext(c))
+	return err
+}
+
+// helpCommandFromContext returns the "s5cmd <command>" path whose --help
+// output applies to the given context, or just "s5cmd" at the top level.
+//
+// urfave/cli runs a command that has subcommands (e.g. select) as a nested
+// App named "<parent app> <command>", so App.Name already carries the path up
+// to the current command.
+func helpCommandFromContext(c *cli.Context) string {
+	name := c.App.Name
+	if c.Command != nil && c.Command.Name != "" {
+		name += " " + c.Command.Name
+	}
+	return name
+}
+
+// setUsageErrorHandler makes every command (and subcommand) that does not
+// define its own OnUsageError report usage errors on stderr.
+func setUsageErrorHandler(cmds []*cli.Command) {
+	for _, cmd := range cmds {
+		if cmd.OnUsageError == nil {
+			cmd.OnUsageError = onUsageError
+		}
+		setUsageErrorHandler(cmd.Subcommands)
+	}
 }
 
 // NewStorageOpts creates storage.Options object from the given context.
@@ -244,6 +275,7 @@ func AppCommand(name string) *cli.Command {
 // Main is the entrypoint function to run given commands.
 func Main(ctx context.Context, args []string) error {
 	app.Commands = Commands()
+	setUsageErrorHandler(app.Commands)
 
 	return app.RunContext(ctx, args)
 }

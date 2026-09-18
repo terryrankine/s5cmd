@@ -460,7 +460,7 @@ func (c Copy) Run(ctx context.Context) error {
 		defer close(errDoneCh)
 		for err := range waiter.Err() {
 			if strings.Contains(err.Error(), "too many open files") {
-				fmt.Println(strings.TrimSpace(fdlimitWarning))
+				fmt.Fprintln(os.Stderr, strings.TrimSpace(fdlimitWarning))
 				printError(c.fullCommand, c.op, err)
 				merrorWaiter = multierror.Append(merrorWaiter, err)
 				cancel()

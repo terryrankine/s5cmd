@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -239,7 +240,7 @@ func (s Sync) Run(c *cli.Context) error {
 		defer close(errDoneCh)
 		for err := range waiter.Err() {
 			if strings.Contains(err.Error(), "too many open files") {
-				fmt.Println(strings.TrimSpace(fdlimitWarning))
+				fmt.Fprintln(os.Stderr, strings.TrimSpace(fdlimitWarning))
 				printError(s.fullCommand, s.op, err)
 				merrorWaiter = multierror.Append(merrorWaiter, err)
 				cancel()
