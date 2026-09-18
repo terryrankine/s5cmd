@@ -4104,17 +4104,61 @@ func TestSyncLocalFolderToS3BucketInAnotherRegionFails(t *testing.T) {
 	assertError(t, err, errS3NoSuchKey)
 }
 
-// sync --delete folder/ s3://bucket/ (listing the folder fails part way)
+// sync folder/ s3://bucket/ (a symlink in folder/ points nowhere)
 //
-// A dangling symlink aborts the directory walk, so the files after it are
-// never listed. The sync must stop instead of deleting their copies from the
-// bucket.
-func TestSyncLocalFolderWithDanglingSymlinkToS3BucketWithDelete(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("creating symlinks needs a privilege on windows")
+// A dangling symlink is an error for that one object, not for the listing:
+// the files after it are still synced (upstream peak/s5cmd#749).
+func TestSyncLocalFolderWithDanglingSymlinkToS3Bucket(t *testing.T) {
+	t.Parallel()
+	requireSymlinks(t)
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	folderLayout := []fs.PathOp{
+		fs.WithFile("a.txt", "S: a"),
+		fs.WithSymlink("m.txt", "does-not-exist"),
+		fs.WithFile("z.txt", "S: z"),
 	}
 
+	workdir := fs.NewDir(t, "somedir", folderLayout...)
+	defer workdir.Remove()
+
+	putFile(t, s3client, bucket, "a.txt", "S: a")
+
+	src := fmt.Sprintf("%v/", workdir.Path())
+	src = filepath.ToSlash(src)
+	dst := fmt.Sprintf("s3://%v/", bucket)
+
+	cmd := s5cmd("sync", src, dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: equals(`ERROR "sync %v %v": given object %vm.txt not found`, src, dst, src),
+	})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp %vz.txt %vz.txt`, src, dst),
+	})
+
+	assert.Assert(t, ensureS3Object(s3client, bucket, "a.txt", "S: a"))
+	assert.Assert(t, ensureS3Object(s3client, bucket, "z.txt", "S: z"))
+}
+
+// sync --delete folder/ s3://bucket/ (a symlink in folder/ points nowhere)
+//
+// The dangling symlink is reported and skipped, and the rest of the folder
+// is synced. A skipped source object leaves the source side uncertain, so
+// --delete removes nothing from the destination (the same rule rsync
+// applies to I/O errors on the sending side): neither the old copy of the
+// link's file nor the stale file, and the sync says so.
+func TestSyncLocalFolderWithDanglingSymlinkToS3BucketWithDelete(t *testing.T) {
 	t.Parallel()
+	requireSymlinks(t)
 
 	s3client, s5cmd := setup(t)
 
@@ -4131,8 +4175,9 @@ func TestSyncLocalFolderWithDanglingSymlinkToS3BucketWithDelete(t *testing.T) {
 	defer workdir.Remove()
 
 	s3Content := map[string]string{
-		"a.txt": "S: a",
-		"z.txt": "S: z",
+		"a.txt":     "S: a",
+		"m.txt":     "D: old copy of m",
+		"stale.txt": "D: stale",
 	}
 	for key, content := range s3Content {
 		putFile(t, s3client, bucket, key, content)
@@ -4148,10 +4193,16 @@ func TestSyncLocalFolderWithDanglingSymlinkToS3BucketWithDelete(t *testing.T) {
 	result.Assert(t, icmd.Expected{ExitCode: 1})
 
 	assertLines(t, result.Stderr(), map[int]compareFunc{
-		0: contains(`ERROR "sync --delete=true %v %v": `, src, dst),
+		0: equals(`ERROR "sync --delete=true %v %v": given object %vm.txt not found`, src, dst, src),
+		1: equals(`ERROR "sync --delete=true %v %v": nothing is deleted from the destination: 1 source object(s) skipped with an error`, src, dst),
 	})
 
-	// nothing was deleted.
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp %vz.txt %vz.txt`, src, dst),
+	})
+
+	// the readable files were synced, nothing was deleted.
+	s3Content["z.txt"] = "S: z"
 	for key, content := range s3Content {
 		assert.Assert(t, ensureS3Object(s3client, bucket, key, content))
 	}
@@ -4569,8 +4620,9 @@ func TestSyncLocalTreeToS3BucketSkipsUnreadableExcludedEntries(t *testing.T) {
 
 // sync "dir/*" s3://bucket/ (an entry that is not excluded cannot be read)
 //
-// The walk must go on past the entry so that the error names it, and the
-// sync must still stop: with an incomplete listing no correct plan exists.
+// The walk must go on past the entry so that the error names it. A file
+// entry (here a dangling symlink) leaves the rest of the listing intact, so
+// the sync reports it, exits non-zero and still syncs the other files.
 func TestSyncLocalTreeToS3BucketReportsUnreadableEntry(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks needs a privilege on windows")
@@ -4604,6 +4656,8 @@ func TestSyncLocalTreeToS3BucketReportsUnreadableEntry(t *testing.T) {
 	assertLines(t, result.Stderr(), map[int]compareFunc{
 		0: contains(`ERROR "sync %v/* %v": given object %v/Omics/a-link not found`, src, dst, src),
 	})
+
+	assert.Assert(t, ensureS3Object(s3client, bucket, "Omics/ready/INFO.md", "S: info"))
 }
 
 // sync "dir/*" s3://bucket/ (a directory that is not excluded cannot be read)

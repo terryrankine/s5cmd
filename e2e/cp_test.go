@@ -3718,6 +3718,147 @@ func TestCopyErrorWhenGivenObjectIsNotFoundUsingWildcard(t *testing.T) {
 	}, sortInput(true))
 }
 
+// cp dir/ s3://bucket/prefix/ (a symlink in dir/ points nowhere)
+//
+// A dangling symlink is an error for that one object. It must not stop the
+// walk of the directory: the files after it are still uploaded (upstream
+// peak/s5cmd#749).
+func TestCopyDirWithDanglingSymlinkToS3(t *testing.T) {
+	t.Parallel()
+	requireSymlinks(t)
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	folderLayout := []fs.PathOp{
+		fs.WithDir(
+			"dir",
+			fs.WithFile("a.txt", "S: a"),
+			fs.WithSymlink("m.txt", "does-not-exist"),
+			fs.WithFile("z.txt", "S: z"),
+		),
+	}
+
+	workdir := fs.NewDir(t, t.Name(), folderLayout...)
+	defer workdir.Remove()
+
+	dst := fmt.Sprintf("s3://%v/prefix/", bucket)
+
+	cmd := s5cmd("cp", "dir/", dst)
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: equals(`ERROR "cp dir/ %v": given object dir/m.txt not found`, dst),
+	})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals("cp dir/a.txt %va.txt", dst),
+		1: equals("cp dir/z.txt %vz.txt", dst),
+	}, sortInput(true))
+
+	assert.Assert(t, ensureS3Object(s3client, bucket, "prefix/a.txt", "S: a"))
+	assert.Assert(t, ensureS3Object(s3client, bucket, "prefix/z.txt", "S: z"))
+}
+
+// cp --no-follow-symlinks dir/ s3://bucket/prefix/ (a symlink in dir/ points nowhere)
+//
+// With --no-follow-symlinks a dangling symlink is skipped like any other
+// symlink, without an error.
+func TestCopyDirWithDanglingSymlinkToS3NoFollowSymlinks(t *testing.T) {
+	t.Parallel()
+	requireSymlinks(t)
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	folderLayout := []fs.PathOp{
+		fs.WithDir(
+			"dir",
+			fs.WithFile("a.txt", "S: a"),
+			fs.WithSymlink("m.txt", "does-not-exist"),
+			fs.WithFile("z.txt", "S: z"),
+		),
+	}
+
+	workdir := fs.NewDir(t, t.Name(), folderLayout...)
+	defer workdir.Remove()
+
+	dst := fmt.Sprintf("s3://%v/prefix/", bucket)
+
+	cmd := s5cmd("cp", "--no-follow-symlinks", "dir/", dst)
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals("cp dir/a.txt %va.txt", dst),
+		1: equals("cp dir/z.txt %vz.txt", dst),
+	}, sortInput(true))
+
+	assert.Assert(t, ensureS3Object(s3client, bucket, "prefix/a.txt", "S: a"))
+	assert.Assert(t, ensureS3Object(s3client, bucket, "prefix/z.txt", "S: z"))
+}
+
+// cp dir/ s3://bucket/prefix/ (a symlink in dir/ points to a file that cannot be read)
+//
+// The link's target exists, so it is listed, but opening it fails. That is
+// an error for that one object and exit code 1; the other files are still
+// uploaded (upstream peak/s5cmd#800, where the target's filesystem returned
+// an input/output error).
+func TestCopyDirWithSymlinkToUnreadableFileToS3(t *testing.T) {
+	t.Parallel()
+	requireSymlinks(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a file with no permission bits")
+	}
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	folderLayout := []fs.PathOp{
+		fs.WithFile("secret.txt", "S: secret", fs.WithMode(0)),
+		fs.WithDir(
+			"dir",
+			fs.WithFile("a.txt", "S: a"),
+			fs.WithSymlink("m.txt", "../secret.txt"),
+			fs.WithFile("z.txt", "S: z"),
+		),
+	}
+
+	workdir := fs.NewDir(t, t.Name(), folderLayout...)
+	defer workdir.Remove()
+
+	dst := fmt.Sprintf("s3://%v/prefix/", bucket)
+
+	cmd := s5cmd("cp", "dir/", dst)
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: equals(`ERROR "cp dir/m.txt %vm.txt": open dir/m.txt: permission denied`, dst),
+	})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals("cp dir/a.txt %va.txt", dst),
+		1: equals("cp dir/z.txt %vz.txt", dst),
+	}, sortInput(true))
+
+	assert.Assert(t, ensureS3Object(s3client, bucket, "prefix/a.txt", "S: a"))
+	assert.Assert(t, ensureS3Object(s3client, bucket, "prefix/z.txt", "S: z"))
+
+	err := ensureS3Object(s3client, bucket, "prefix/m.txt", "S: secret")
+	assertError(t, err, errS3NoSuchKey)
+}
+
 // cp --no-follow-symlinks * s3://bucket/prefix/
 func TestCopyWithNoFollowSymlink(t *testing.T) {
 	t.Parallel()

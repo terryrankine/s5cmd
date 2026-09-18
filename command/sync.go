@@ -169,6 +169,10 @@ type syncErrors struct {
 	mu    sync.Mutex
 	count int
 	first error
+
+	// skippedSrc counts the source objects that were listed but could not
+	// be synced. --delete removes nothing while it is non-zero, see planRun.
+	skippedSrc int
 }
 
 func (e *syncErrors) add(err error) {
@@ -178,6 +182,18 @@ func (e *syncErrors) add(err error) {
 		e.first = err
 	}
 	e.count++
+}
+
+func (e *syncErrors) addSkippedSrc() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.skippedSrc++
+}
+
+func (e *syncErrors) skippedSrcCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.skippedSrc
 }
 
 // err summarises the recorded errors, or returns nil if there were none.
@@ -315,6 +331,13 @@ func (s Sync) reportError(err error) {
 	s.errs.add(err)
 }
 
+// reportSkippedSrc reports err about a listed source object that is left
+// out of the sync. Run exits non-zero and --delete removes nothing.
+func (s Sync) reportSkippedSrc(err error) {
+	s.reportError(err)
+	s.errs.addSkippedSrc()
+}
+
 // compareObjects compares source and destination objects. It assumes that
 // sourceObjects and destObjects channels are already sorted in ascending order.
 // Returns objects those in only source, only destination
@@ -442,7 +465,7 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 				if st.Err != nil && st.URL != nil && s.isFilteredOut(st.URL.Path, srcurl.Prefix) {
 					continue
 				}
-				if isListingError(st.Err) {
+				if isListingError(st) {
 					// the source listing is incomplete, so no correct plan
 					// can be made from it: report the error and stop.
 					s.reportError(st.Err)
@@ -491,7 +514,7 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 			defer close(filteredDstObjectChannel)
 			// filter and redirect objects
 			for dt := range unfilteredDestObjectsChannel {
-				if isListingError(dt.Err) {
+				if isListingError(dt) {
 					// the destination listing is incomplete. Going on would
 					// treat the destination as (partly) empty: every source
 					// object would be copied again and --delete would remove
@@ -672,6 +695,14 @@ func (s Sync) planRun(
 			fmt.Fprintln(w, command)
 		}
 
+		// A source object skipped with an error (a dangling symlink, an
+		// unreadable file) is not in the source stream, so its copy in the
+		// destination looks stale and would be deleted; behind a symlink
+		// into a broken mount that is a whole subtree. Refuse to delete
+		// anything instead, as rsync does on I/O errors on the sending
+		// side. The count is final before the first destination-only
+		// object arrives: the sort reads the whole source listing first.
+		checked := false
 		for {
 			select {
 			case <-ctx.Done():
@@ -680,6 +711,16 @@ func (s Sync) planRun(
 				if !ok {
 					flush()
 					return
+				}
+				if !checked {
+					checked = true
+					if n := s.errs.skippedSrcCount(); n > 0 {
+						s.reportError(fmt.Errorf("nothing is deleted from the destination: %d source object(s) skipped with an error", n))
+						for range onlyDest {
+							// drain so the comparison can finish
+						}
+						return
+					}
 				}
 				// objects filtered out by --exclude/--include are not part
 				// of the sync, so they must not be deleted from the
@@ -739,7 +780,13 @@ func (s Sync) shouldSkipSrcObject(object *storage.Object, verbose bool) bool {
 
 	if err := object.Err; err != nil {
 		if verbose {
-			s.reportError(err)
+			// an error without a URL is about the listing as a whole, such
+			// as an empty source ("no object found"): nothing was skipped.
+			if object.URL == nil {
+				s.reportError(err)
+			} else {
+				s.reportSkippedSrc(err)
+			}
 		}
 		return true
 	}
@@ -749,7 +796,7 @@ func (s Sync) shouldSkipSrcObject(object *storage.Object, verbose bool) bool {
 	if object.StorageClass.IsGlacier() && !s.forceGlacierTransfer {
 		if verbose && !s.ignoreGlacierWarnings {
 			err := fmt.Errorf("object '%v' is on Glacier storage", object)
-			s.reportError(err)
+			s.reportSkippedSrc(err)
 		}
 		return true
 	}
@@ -771,14 +818,24 @@ func (s Sync) shouldSkipDstObject(object *storage.Object, verbose bool) bool {
 	return false
 }
 
-// isListingError reports whether err, received while listing the source or
-// the destination, leaves that listing incomplete. An empty listing (no
-// object or no match found) and a cancellation are not errors of that kind.
-// Any other error is, whatever its code: the sync must stop, or it would plan
-// from a partial listing.
-func isListingError(err error) bool {
-	if err == nil || errors.Is(err, storage.ErrNoObjectFound) {
+// isListingError reports whether obj, received while listing the source or
+// the destination, means that listing is incomplete.
+//
+// An entry that was listed but cannot be read comes with its URL. For a
+// file entry (a dangling symlink, a file on a broken mount) the rest of
+// the listing is intact: the error is about that one object and is handled
+// per object. For a directory (its URL ends in "/") everything under it is
+// missing, so the listing is incomplete. An empty listing (no object or no
+// match found) and a cancellation are not errors either. Any other error
+// is, whatever its code: the sync must stop, or it would plan from a
+// partial listing.
+func isListingError(obj *storage.Object) bool {
+	err := obj.Err
+	if err == nil || errors.Is(err, storage.ErrNoObjectFound) || errorpkg.IsCancelation(err) {
 		return false
 	}
-	return !errorpkg.IsCancelation(err)
+	if obj.URL != nil && !strings.HasSuffix(obj.URL.Path, "/") {
+		return false
+	}
+	return true
 }

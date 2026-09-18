@@ -185,8 +185,12 @@ func walkDir(ctx context.Context, fs *Filesystem, src *url.URL, followSymlinks b
 		// the entry with its URL, so that callers can tell it apart from a
 		// failure of the walk itself, and go on with the rest of the tree.
 		ErrorCallback: func(pathname string, err error) godirwalk.ErrorAction {
-			if fi, lerr := os.Lstat(pathname); lerr == nil && fi.IsDir() {
-				// mark a directory as such: "--exclude dir/*" matches "dir/".
+			// Stat, not Lstat: a symlink only gets here when symlinks are
+			// followed, and one that leads to a directory that cannot be
+			// read hides a whole subtree, like the directory itself would.
+			if fi, serr := os.Stat(pathname); serr == nil && fi.IsDir() {
+				// mark a directory as such: "--exclude dir/*" matches "dir/",
+				// and sync knows the listing under it is missing.
 				pathname += string(os.PathSeparator)
 			}
 			fileurl, uerr := url.New(pathname)
