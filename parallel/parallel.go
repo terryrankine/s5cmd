@@ -16,6 +16,9 @@ type Task func() error
 type Manager struct {
 	wg        *sync.WaitGroup
 	semaphore chan struct{}
+
+	mu     sync.Mutex
+	closed bool
 }
 
 // New creates a new parallel.Manager.
@@ -37,7 +40,6 @@ func New(workercount int) *Manager {
 // acquire limits concurrency by trying to acquire the semaphore.
 func (p *Manager) acquire() {
 	p.semaphore <- struct{}{}
-	p.wg.Add(1)
 }
 
 // release releases the acquired semaphore to signal that a task is finished.
@@ -48,7 +50,26 @@ func (p *Manager) release() {
 
 // Run runs the given task while limiting the concurrency.
 func (p *Manager) Run(fn Task, waiter *Waiter) {
+	if fn == nil {
+		panic("parallel: Run called with a nil task")
+	}
+	if waiter == nil {
+		panic("parallel: Run called with a nil waiter")
+	}
+
+	// Register under the lock so Close cannot mark the manager closed and
+	// see an empty WaitGroup while a task is still on its way in. The slot
+	// is acquired outside the lock: waiting for a free worker must not
+	// block Close or other callers.
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		panic("parallel: Run called after Close")
+	}
+	p.wg.Add(1)
 	waiter.wg.Add(1)
+	p.mu.Unlock()
+
 	p.acquire()
 	go func() {
 		defer waiter.wg.Done()
@@ -62,6 +83,14 @@ func (p *Manager) Run(fn Task, waiter *Waiter) {
 
 // Close waits all tasks to finish.
 func (p *Manager) Close() {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.closed = true
+	p.mu.Unlock()
+
 	p.wg.Wait()
 	close(p.semaphore)
 }
@@ -71,6 +100,7 @@ func (p *Manager) Close() {
 type Waiter struct {
 	wg    sync.WaitGroup
 	errch chan error
+	once  sync.Once
 }
 
 // NewWaiter creates a new parallel.Waiter.
@@ -84,7 +114,7 @@ func NewWaiter() *Waiter {
 // and closes error channel.
 func (w *Waiter) Wait() {
 	w.wg.Wait()
-	close(w.errch)
+	w.once.Do(func() { close(w.errch) })
 }
 
 // Err returns read-only error channel.
