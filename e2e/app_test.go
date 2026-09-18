@@ -208,8 +208,25 @@ func TestAppUnknownCommand(t *testing.T) {
 
 	result.Assert(t, icmd.Expected{ExitCode: 1})
 
+	assertLines(t, result.Stdout(), map[int]compareFunc{})
 	assertLines(t, result.Stderr(), map[int]compareFunc{
 		0: equals(`ERROR "unknown-command": command not found`),
+	})
+}
+
+func TestAppMissingArguments(t *testing.T) {
+	t.Parallel()
+
+	_, s5cmd := setup(t)
+
+	cmd := s5cmd("cp")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{})
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: equals(`ERROR "cp": expected source and destination arguments`),
 	})
 }
 
@@ -248,6 +265,64 @@ func TestUsageError(t *testing.T) {
 		0: equals("Incorrect Usage: flag provided but not defined: -recursive"),
 		1: equals("See 's5cmd --help' for usage"),
 	})
+}
+
+// A usage error after the command name (e.g. a global flag such as --json in
+// the wrong place) must go to stderr, so that redirected stdout stays clean.
+func TestUsageErrorAfterCommand(t *testing.T) {
+	t.Parallel()
+
+	testcases := []struct {
+		name     string
+		args     []string
+		flag     string
+		helpHint string
+	}{
+		{
+			name:     "global flag after command",
+			args:     []string{"ls", "--json", "s3://bucket"},
+			flag:     "json",
+			helpHint: "s5cmd ls",
+		},
+		{
+			name:     "unknown flag",
+			args:     []string{"cp", "--foo", "src", "dst"},
+			flag:     "foo",
+			helpHint: "s5cmd cp",
+		},
+		{
+			name:     "command with subcommands",
+			args:     []string{"select", "--foo", "s3://bucket/key"},
+			flag:     "foo",
+			helpHint: "s5cmd select",
+		},
+		{
+			name:     "nested subcommand",
+			args:     []string{"select", "csv", "--foo", "s3://bucket/key"},
+			flag:     "foo",
+			helpHint: "s5cmd select csv",
+		},
+	}
+
+	for _, tc := range testcases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, s5cmd := setup(t)
+
+			cmd := s5cmd(tc.args...)
+			result := icmd.RunCmd(cmd)
+
+			result.Assert(t, icmd.Expected{ExitCode: 1})
+
+			assertLines(t, result.Stdout(), map[int]compareFunc{})
+			assertLines(t, result.Stderr(), map[int]compareFunc{
+				0: equals("Incorrect Usage: flag provided but not defined: -%s", tc.flag),
+				1: equals("See '%s --help' for usage", tc.helpHint),
+			})
+		})
+	}
 }
 
 func TestInvalidLoglevel(t *testing.T) {

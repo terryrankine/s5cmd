@@ -278,6 +278,15 @@ func TestCheckMatch(t *testing.T) {
 			},
 		},
 		{
+			name: "match_exact_key_and_siblings_relative_to_same_base_if_has_no_wildcard",
+			url:  "s3://bucket/a/b/c/foo",
+			keys: map[string]matchResult{
+				"a/b/c/foo":    {true, "foo"},
+				"a/b/c/foo/":   {true, "foo/"},
+				"a/b/c/foobar": {true, "foobar"},
+			},
+		},
+		{
 			name: "match_multiple_if_has_no_wildcard_and_dir_root",
 			url:  "s3://bucket/key/",
 			keys: map[string]matchResult{
@@ -425,10 +434,28 @@ func TestParseNonBatch(t *testing.T) {
 			want:   "d/e",
 		},
 		{
-			name:   "do_nothing_if_prefix_equals_to_key",
+			name:   "return_last_element_if_prefix_equals_to_key",
 			prefix: "a/b",
 			key:    "a/b",
-			want:   "a/b",
+			want:   "b",
+		},
+		{
+			name:   "return_last_element_if_nested_prefix_equals_to_key",
+			prefix: "a/b/c/foo",
+			key:    "a/b/c/foo",
+			want:   "foo",
+		},
+		{
+			name:   "do_nothing_if_prefix_equals_to_key_and_has_no_slash",
+			prefix: "foo",
+			key:    "foo",
+			want:   "foo",
+		},
+		{
+			name:   "do_nothing_if_prefix_equals_to_key_and_is_dir",
+			prefix: "a/b/",
+			key:    "a/b/",
+			want:   "a/b/",
 		},
 		{
 			name:   "parse_key_and_return_first_dir_after_prefix",
@@ -650,6 +677,54 @@ func TestToFromBytes(t *testing.T) {
 			}
 			if !url.deepEqual(newURL) {
 				t.Errorf("Not equal")
+			}
+		})
+	}
+}
+
+func TestJoinInside(t *testing.T) {
+	t.Parallel()
+
+	testcases := []struct {
+		base    string
+		join    string
+		want    string
+		escapes bool
+	}{
+		{base: "dest", join: "a/b.txt", want: "dest/a/b.txt"},
+		{base: "dest/", join: "a/b.txt", want: "dest/a/b.txt"},
+		{base: "dest", join: "a/../b.txt", want: "dest/b.txt"},
+		{base: "dest", join: "../b.txt", escapes: true},
+		{base: "dest", join: "a/../../b.txt", escapes: true},
+		{base: "dest", join: "..", escapes: true},
+		{base: "dest", join: "../dest2/b.txt", escapes: true},
+		{base: ".", join: "a/b.txt", want: "a/b.txt"},
+		{base: ".", join: "../b.txt", escapes: true},
+		{base: "/", join: "../b.txt", want: "/b.txt"},
+		{base: "s3://bucket/prefix/", join: "../b.txt", want: "prefix/../b.txt"},
+	}
+
+	for _, tc := range testcases {
+		tc := tc
+		t.Run(tc.base+"+"+tc.join, func(t *testing.T) {
+			t.Parallel()
+
+			u, err := New(tc.base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := u.JoinInside(tc.join)
+			if tc.escapes {
+				if err == nil {
+					t.Fatalf("expected an error, got %q", got.Path)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Path != tc.want {
+				t.Errorf("got %q, want %q", got.Path, tc.want)
 			}
 		})
 	}

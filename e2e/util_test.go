@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -78,6 +79,10 @@ type setupOpts struct {
 	region      string
 	timeSource  gofakes3.TimeSource
 	enableProxy bool
+	// bucketRegion, if set, makes the fake server reject requests signed
+	// for another region like Amazon S3 does. See regionRedirect.
+	bucketRegion string
+	backend      *gofakes3.Backend
 }
 
 type option func(*setupOpts)
@@ -124,6 +129,24 @@ func withProxy() option {
 	}
 }
 
+// withBucketRegion puts every bucket of the fake server in the given region.
+// The test's own S3 client signs for that region; s5cmd has to find it, via
+// a region flag or auto-detection, or its requests fail with a
+// BucketRegionError as they do against Amazon S3.
+func withBucketRegion(region string) option {
+	return func(opts *setupOpts) {
+		opts.bucketRegion = region
+	}
+}
+
+// withBackend hands the fake server's storage backend back to the caller.
+// It stays nil when the tests run against a real endpoint.
+func withBackend(backend *gofakes3.Backend) option {
+	return func(opts *setupOpts) {
+		opts.backend = backend
+	}
+}
+
 type credentialCfg struct {
 	AccessKeyID string
 	SecretKey   string
@@ -148,7 +171,11 @@ func setup(t *testing.T, options ...option) (*s3.S3, func(...string) icmd.Cmd) {
 	if isEndpointFromEnv() {
 		endpoint = os.Getenv(s5cmdTestEndpointEnv)
 	} else {
-		endpoint = server(t, testdir, opts)
+		var backend gofakes3.Backend
+		endpoint, backend = server(t, testdir, opts)
+		if opts.backend != nil {
+			*opts.backend = backend
+		}
 	}
 
 	// one of the tests check if s5cmd correctly fails when an incorrect endpoint is given.
@@ -169,6 +196,17 @@ func setup(t *testing.T, options ...option) (*s3.S3, func(...string) icmd.Cmd) {
 	region := ""
 	if opts.region != "" {
 		region = opts.region
+	}
+
+	if region == "" && opts.bucketRegion != "" {
+		// the test client must sign for the region the fake server enforces.
+		region = opts.bucketRegion
+		if accessKeyID == "" {
+			accessKeyID = defaultAccessKeyID
+		}
+		if secretKey == "" {
+			secretKey = defaultSecretAccessKey
+		}
 	}
 
 	var cfg *credentialCfg
@@ -205,7 +243,7 @@ func workdir(t *testing.T) (*fs.Dir, string) {
 	return testdir, workdir
 }
 
-func server(t *testing.T, testdir *fs.Dir, opts *setupOpts) string {
+func server(t *testing.T, testdir *fs.Dir, opts *setupOpts) (string, gofakes3.Backend) {
 	t.Helper()
 
 	s3LogLevel := *flagTestLogLevel
@@ -214,9 +252,7 @@ func server(t *testing.T, testdir *fs.Dir, opts *setupOpts) string {
 		s3LogLevel = "info" // aws has no level other than 'debug'
 	}
 
-	endpoint := s3ServerEndpoint(t, testdir, s3LogLevel, opts.s3backend, opts.timeSource, opts.enableProxy)
-
-	return endpoint
+	return s3ServerEndpoint(t, testdir, s3LogLevel, opts.s3backend, opts.timeSource, opts.enableProxy, opts.bucketRegion)
 }
 
 func s3client(t *testing.T, options storage.Options, creds *credentialCfg) *s3.S3 {
@@ -322,6 +358,20 @@ func skipTestIfGCS(t *testing.T, format string) {
 
 	if storage.IsGoogleEndpoint(*endpoint) {
 		t.Skip(format)
+	}
+}
+
+// requireSymlinks skips the test when the process cannot create symlinks.
+// On Windows that needs Developer Mode or SeCreateSymbolicLinkPrivilege;
+// without either, os.Symlink fails with ERROR_PRIVILEGE_NOT_HELD (1314).
+// Any other error is left for the test itself to report.
+func requireSymlinks(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+	err := os.Symlink(filepath.Join(dir, "target"), filepath.Join(dir, "link"))
+	if err != nil && runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314)) {
+		t.Skipf("symlinks need Developer Mode or SeCreateSymbolicLinkPrivilege: %v", err)
 	}
 }
 
@@ -436,7 +486,14 @@ func createBucket(t *testing.T, client *s3.S3, bucket string) {
 
 	_, err := client.CreateBucket(input)
 	if err != nil {
-		t.Fatal(err)
+		// The SDK retries a slow CreateBucket; the retry then gets 409 for
+		// the bucket the first attempt already created. Bucket names carry
+		// a random suffix, so "already exists" here means "ours".
+		var aerr awserr.Error
+		if !errors.As(err, &aerr) ||
+			(aerr.Code() != s3.ErrCodeBucketAlreadyOwnedByYou && aerr.Code() != s3.ErrCodeBucketAlreadyExists) {
+			t.Fatal(err)
+		}
 	}
 
 	if !isEndpointFromEnv() {
@@ -754,6 +811,35 @@ func putStorageClass(storageClass string) putOption {
 	}
 }
 
+// assertS3Keys asserts that the bucket holds exactly the keys of want (the
+// map values are ignored). It catches stray objects that ensureS3Object,
+// which only looks up the keys it is given, would miss.
+func assertS3Keys(t *testing.T, client *s3.S3, bucket string, want map[string]string) {
+	t.Helper()
+
+	var got []string
+	err := client.ListObjectsPages(&s3.ListObjectsInput{Bucket: aws.String(bucket)}, func(p *s3.ListObjectsOutput, _ bool) bool {
+		for _, c := range p.Contents {
+			got = append(got, aws.StringValue(c.Key))
+		}
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := make([]string, 0, len(want))
+	for key := range want {
+		expected = append(expected, key)
+	}
+	sort.Strings(expected)
+	sort.Strings(got)
+
+	if diff := cmp.Diff(expected, got); diff != "" {
+		t.Errorf("s3 keys in %v: (-want +got):\n%v", bucket, diff)
+	}
+}
+
 func putFile(t *testing.T, client *s3.S3, bucket string, filename string, content string, opts ...putOption) {
 	t.Helper()
 	input := &s3.PutObjectInput{
@@ -770,6 +856,56 @@ func putFile(t *testing.T, client *s3.S3, bucket string, filename string, conten
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// putDirectoryMarker creates a zero-byte object whose key ends with "/".
+//
+// gofakes3 trims trailing slashes from request paths, so such a key cannot be
+// created through its HTTP API. When the fake backend is available the object
+// is written to it directly; otherwise a plain PutObject is used.
+func putDirectoryMarker(t *testing.T, client *s3.S3, backend gofakes3.Backend, bucket, key string) {
+	t.Helper()
+
+	if backend == nil {
+		putFile(t, client, bucket, key, "")
+		return
+	}
+
+	if _, err := backend.PutObject(bucket, key, nil, strings.NewReader(""), 0, gofakes3.StorageStandard); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// s3ObjectExists reports whether the object is in the bucket. It reads the
+// fake backend directly when one is given, for the same reason as
+// putDirectoryMarker.
+func s3ObjectExists(t *testing.T, client *s3.S3, backend gofakes3.Backend, bucket, key string) bool {
+	t.Helper()
+
+	if backend == nil {
+		_, err := client.HeadObject(&s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		if err == nil {
+			return true
+		}
+		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == "NotFound" {
+			return false
+		}
+		t.Fatal(err)
+	}
+
+	obj, err := backend.HeadObject(bucket, key)
+	if err == nil {
+		obj.Contents.Close()
+		return true
+	}
+	if gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchKey) {
+		return false
+	}
+	t.Fatal(err)
+	return false
 }
 
 func replaceMatchWithSpace(input string, match ...string) string {
@@ -1206,4 +1342,29 @@ func indexSlice(slice []string, target string, fn func(str, target string) bool)
 		}
 	}
 	return -1
+}
+
+// splitStatTable splits stdout of a command run with --stat into the
+// operation output that precedes the stat table and the table rows, keyed
+// by operation name with "total error success" as the value.
+func splitStatTable(t *testing.T, stdout string) (string, map[string]string) {
+	t.Helper()
+
+	const header = "\nOperation\tTotal\tError\tSuccess\t\n"
+
+	output, table, found := strings.Cut(stdout, header)
+	if !found {
+		t.Fatalf("stat table not found in output:\n%v", stdout)
+	}
+
+	rows := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(table), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 4 {
+			t.Fatalf("unexpected stat table row %q", line)
+		}
+		rows[fields[0]] = strings.Join(fields[1:], " ")
+	}
+
+	return output, rows
 }

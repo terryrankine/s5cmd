@@ -1,7 +1,6 @@
 package command
 
 import (
-	"flag"
 	"testing"
 
 	"github.com/urfave/cli/v2"
@@ -13,6 +12,7 @@ func TestValidateRMCommand(t *testing.T) {
 	tests := []struct {
 		name           string
 		sources        []string
+		raw            bool
 		expectedErrStr string
 	}{
 		{
@@ -46,6 +46,21 @@ func TestValidateRMCommand(t *testing.T) {
 			},
 		},
 		{
+			name: "error_if_sources_have_s3_prefix_with_raw_flag_and_bucket",
+			sources: []string{
+				"s3://bucket",
+			},
+			raw:            true,
+			expectedErrStr: "s3 bucket/prefix cannot be used for delete operations (forgot wildcard character?)",
+		},
+		{
+			name: "success_if_sources_have_s3_prefix_with_raw_flag",
+			sources: []string{
+				"s3://bucket/prefix/",
+			},
+			raw: true,
+		},
+		{
 			name: "error_if_different_buckets",
 			sources: []string{
 				"s3://bucket/object",
@@ -57,7 +72,13 @@ func TestValidateRMCommand(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			flagset := flag.NewFlagSet("rm", flag.ExitOnError)
+			cmd := NewDeleteCommand()
+			flagset := flagSet(t, cmd.Name, cmd.Flags)
+			if tc.raw {
+				if err := flagset.Set("raw", "true"); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if err := flagset.Parse(tc.sources); err != nil {
 				t.Error(err)
 			}

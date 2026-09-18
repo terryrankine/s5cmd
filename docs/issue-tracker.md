@@ -166,7 +166,52 @@ Upstream: everything was bundled in [#859](https://github.com/peak/s5cmd/pull/85
 ## Stats
 
 - **Total open issues:** 136
-- **Fixed by our branch:** 20
-- **Improved/partially addressed:** 25
-- **Not fixed:** 71
+- **Fixed by our branch:** 32
+- **Improved/partially addressed:** 24
+- **Not fixed:** 66
 - **Questions (not actionable):** 20
+
+## Reconciliation against v2.4.1 (2026-09-18)
+
+Upstream has 144 open issues (136 in March + 8 new, none closed). Each was checked against the v2.4.1 build; "verified" means an automated test in this repo reproduces the issue on the old code and passes on v2.4.1.
+
+### Resolved in v2.4.1 (new since March)
+
+| Issue | Title | How | Verified |
+|-------|-------|-----|----------|
+| [#872](https://github.com/peak/s5cmd/issues/872) | **Path traversal in S3→local downloads (RCE)** | keys resolving outside the destination are rejected; exit 1 | e2e cp + sync, 11 unit cases; confirmed vulnerable on v2.4.0 first |
+| [#869](https://github.com/peak/s5cmd/issues/869) | sync errors but exits 0 | every printed ERROR reaches the exit code | e2e |
+| [#852](https://github.com/peak/s5cmd/issues/852) | sync --delete never deletes | root cause: destination listing failed silently (BucketRegionError); listing errors now stop the sync; generated rm carries the region | e2e with a region-redirecting fake |
+| [#804](https://github.com/peak/s5cmd/issues/804) | errors to stdout | usage errors → stderr | e2e |
+| [#744](https://github.com/peak/s5cmd/issues/744) | umask not honoured | files created 0666 before umask | unit (umask 022/002/077) |
+| [#826](https://github.com/peak/s5cmd/issues/826) | chmod not permitted | no chmod call any more | same fix |
+| [#868](https://github.com/peak/s5cmd/issues/868) | --exclude-from / --include-from | added to cp, mv, rm, sync, ls, du, select | unit + e2e |
+| [#649](https://github.com/peak/s5cmd/issues/649) | --stat rm count | one stat per object | e2e |
+| [#755](https://github.com/peak/s5cmd/issues/755) | ls mixes full and relative paths | exact match rendered like its siblings | unit + e2e |
+| [#870](https://github.com/peak/s5cmd/issues/870), [#844](https://github.com/peak/s5cmd/issues/844) | slow / non-parallel deletes | DeleteObjects batches run on the worker pool (was a fixed 10) | unit (concurrency asserted); 3.3s → 1.05s on a 100-batch mock |
+| [#707](https://github.com/peak/s5cmd/issues/707), [#834](https://github.com/peak/s5cmd/issues/834) | rm of directory markers | `rm --raw s3://b/dir/` | unit + e2e |
+| [#815](https://github.com/peak/s5cmd/issues/815) | sync --delete ignores --exclude | fixed properly (v2.4.0's fix was incomplete; copy side fixed too) | 6 e2e |
+| [#839](https://github.com/peak/s5cmd/issues/839) | shouldOverride region | destination HEAD uses --destination-region | — (same as upstream #862) |
+| [#817](https://github.com/peak/s5cmd/issues/817) | humanize suffix | `512B` | unit + e2e |
+| [#824](https://github.com/peak/s5cmd/issues/824) | sync silently fails in wrong region | covered by the #852 fix | e2e |
+
+### Investigated, not a bug
+
+| Issue | Finding |
+|-------|---------|
+| [#718](https://github.com/peak/s5cmd/issues/718) | `cp -n` producing `file.jpg.jpg`: not reproducible on v2.4.1, master, or the reporter's exact v2.2.2 build. The doubled names must already be on disk. Regression tests added for the dir-without-slash + `-n` shape. Suggested reply: `ls -la 2022/01`. |
+
+### New since March, still open
+
+| Issue | Title | Status |
+|-------|-------|--------|
+| [#865](https://github.com/peak/s5cmd/issues/865) | cp fails with 400 on KMS-encrypted cross-account bucket | needs real AWS to reproduce |
+| [#875](https://github.com/peak/s5cmd/issues/875) | "Lots of output, no actual syncing" (sshfs destination) | question; possibly UNC path parsing on Windows |
+| [#877](https://github.com/peak/s5cmd/issues/877) | scoped prefix suggestion | feature, vague |
+| [#873](https://github.com/peak/s5cmd/issues/873) | new release possible | this is it |
+| [#697](https://github.com/peak/s5cmd/issues/697) | dry-run indication in output | deferred: changes output scripts parse |
+| [#796](https://github.com/peak/s5cmd/issues/796) | message when sync has nothing to do | deferred: same reason |
+| [#542](https://github.com/peak/s5cmd/issues/542) | X-Amz-Content-Sha256 on cross-region copy | needs real AWS |
+| [#758](https://github.com/peak/s5cmd/issues/758) | sync s3 to s3? | question (it works) |
+
+Everything else in the NOT FIXED tables above is unchanged.

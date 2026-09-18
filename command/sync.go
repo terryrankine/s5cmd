@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -9,15 +10,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/hashicorp/go-multierror"
 	"github.com/lanrat/extsort"
 	"github.com/urfave/cli/v2"
 
 	errorpkg "github.com/peak/s5cmd/v2/error"
-	"github.com/peak/s5cmd/v2/log"
 	"github.com/peak/s5cmd/v2/log/stat"
-	"github.com/peak/s5cmd/v2/parallel"
 	"github.com/peak/s5cmd/v2/storage"
 	"github.com/peak/s5cmd/v2/storage/url"
 )
@@ -83,7 +81,7 @@ func NewSyncCommandFlags() []cli.Flag {
 		},
 		&cli.BoolFlag{
 			Name:  "exit-on-error",
-			Usage: "stops the sync process if an error is received",
+			Usage: "stops the sync process if an error is received (kept for backward compatibility: an error while listing the source or the destination always stops the sync)",
 		},
 	}
 	sharedFlags := NewSharedFlags()
@@ -108,7 +106,11 @@ func NewSyncCommand() *cli.Command {
 		Action: func(c *cli.Context) (err error) {
 			defer stat.Collect(c.Command.FullName(), &err)()
 
-			return NewSync(c).Run(c)
+			s, err := NewSync(c)
+			if err != nil {
+				return err
+			}
+			return s.Run(c)
 		},
 	}
 
@@ -128,11 +130,10 @@ type Sync struct {
 	fullCommand string
 
 	// flags
-	delete      bool
-	sizeOnly    bool
-	exitOnError bool
-	exclude     []string
-	include     []string
+	delete   bool
+	sizeOnly bool
+	exclude  []string
+	include  []string
 
 	// patterns
 	excludePatterns []*regexp.Regexp
@@ -141,38 +142,92 @@ type Sync struct {
 	// s3 options
 	storageOpts storage.Options
 
-	followSymlinks bool
-	storageClass   storage.StorageClass
-	raw            bool
+	followSymlinks        bool
+	storageClass          storage.StorageClass
+	raw                   bool
+	forceGlacierTransfer  bool
+	ignoreGlacierWarnings bool
 
 	srcRegion string
 	dstRegion string
+
+	// errs collects the errors reported while listing and planning. Run
+	// sets it and folds it into its result.
+	errs *syncErrors
+}
+
+// syncErrors records the errors sync reports while it lists objects and
+// plans commands. Those steps run in goroutines that print as they go and
+// cannot return an error, so without this record a printed ERROR could
+// still end in exit code 0.
+type syncErrors struct {
+	mu    sync.Mutex
+	count int
+	first error
+}
+
+func (e *syncErrors) add(err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.first == nil {
+		e.first = err
+	}
+	e.count++
+}
+
+// err summarises the recorded errors, or returns nil if there were none.
+func (e *syncErrors) err() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	switch e.count {
+	case 0:
+		return nil
+	case 1:
+		return e.first
+	default:
+		return fmt.Errorf("%w (and %d more errors)", e.first, e.count-1)
+	}
 }
 
 // NewSync creates Sync from cli.Context
-func NewSync(c *cli.Context) Sync {
+func NewSync(c *cli.Context) (Sync, error) {
+	fullCommand := commandFromContext(c)
+
+	exclude, err := patternsFromContext(c, "exclude")
+	if err != nil {
+		printError(fullCommand, c.Command.Name, err)
+		return Sync{}, err
+	}
+
+	include, err := patternsFromContext(c, "include")
+	if err != nil {
+		printError(fullCommand, c.Command.Name, err)
+		return Sync{}, err
+	}
+
 	return Sync{
 		src:         c.Args().Get(0),
 		dst:         c.Args().Get(1),
 		op:          c.Command.Name,
-		fullCommand: commandFromContext(c),
+		fullCommand: fullCommand,
 
 		// flags
-		delete:      c.Bool("delete"),
-		sizeOnly:    c.Bool("size-only"),
-		exitOnError: c.Bool("exit-on-error"),
-		exclude:     c.StringSlice("exclude"),
-		include:     c.StringSlice("include"),
+		delete:   c.Bool("delete"),
+		sizeOnly: c.Bool("size-only"),
+		exclude:  exclude,
+		include:  include,
 
 		// flags
-		followSymlinks: !c.Bool("no-follow-symlinks"),
-		storageClass:   storage.StorageClass(c.String("storage-class")),
-		raw:            c.Bool("raw"),
+		followSymlinks:        !c.Bool("no-follow-symlinks"),
+		storageClass:          storage.StorageClass(c.String("storage-class")),
+		raw:                   c.Bool("raw"),
+		forceGlacierTransfer:  c.Bool("force-glacier-transfer"),
+		ignoreGlacierWarnings: c.Bool("ignore-glacier-warnings"),
 		// region settings
 		srcRegion:   c.String("source-region"),
 		dstRegion:   c.String("destination-region"),
 		storageOpts: NewStorageOpts(c),
-	}
+	}, nil
 }
 
 // Run compares files, plans necessary s5cmd commands to execute
@@ -203,6 +258,8 @@ func (s Sync) Run(c *cli.Context) error {
 	ctx, cancel := context.WithCancel(c.Context)
 	defer cancel()
 
+	s.errs = &syncErrors{}
+
 	sourceObjects, destObjects, err := s.getSourceAndDestinationObjects(ctx, cancel, srcurl, dsturl)
 	if err != nil {
 		printError(s.fullCommand, s.op, err)
@@ -229,35 +286,28 @@ func (s Sync) Run(c *cli.Context) error {
 	sourceObjects = nil
 	destObjects = nil
 
-	waiter := parallel.NewWaiter()
-	var (
-		merrorWaiter error
-		errDoneCh    = make(chan struct{})
-	)
-
-	go func() {
-		defer close(errDoneCh)
-		for err := range waiter.Err() {
-			if strings.Contains(err.Error(), "too many open files") {
-				fmt.Println(strings.TrimSpace(fdlimitWarning))
-				printError(s.fullCommand, s.op, err)
-				merrorWaiter = multierror.Append(merrorWaiter, err)
-				cancel()
-				continue
-			}
-			printError(s.fullCommand, s.op, err)
-			merrorWaiter = multierror.Append(merrorWaiter, err)
-		}
-	}()
-
 	strategy := NewStrategy(s.sizeOnly) // create comparison strategy.
 	pipeReader, pipeWriter := io.Pipe() // create a reader, writer pipe to pass commands to run
 
 	// Create commands in background.
 	go s.planRun(ctx, c, onlySource, onlyDest, commonObjects, dsturl, strategy, pipeWriter, isBatch)
 
+	// The generated cp/rm commands report their own failures through Run's
+	// result. Add the errors the listing and planning goroutines printed;
+	// unless the run was cancelled, they all finished before the command
+	// pipe was closed.
 	err = NewRun(c, pipeReader).Run(ctx)
-	return multierror.Append(err, merrorWaiter).ErrorOrNil()
+	return multierror.Append(err, s.errs.err()).ErrorOrNil()
+}
+
+// reportError prints err and records it so that Run exits non-zero.
+func (s Sync) reportError(err error) {
+	// printError does not print cancelation errors; do not record them either.
+	if errorpkg.IsCancelation(err) {
+		return
+	}
+	printError(s.fullCommand, s.op, err)
+	s.errs.add(err)
 }
 
 // compareObjects compares source and destination objects. It assumes that
@@ -380,16 +430,21 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 			defer close(filteredSrcObjectChannel)
 			// filter and redirect objects
 			for st := range unfilteredSrcObjectChannel {
-				if st.Err != nil && s.shouldStopSync(st.Err) {
-					msg := log.ErrorMessage{
-						Err:       cleanupError(st.Err),
-						Command:   s.fullCommand,
-						Operation: s.op,
-					}
-					log.Error(msg)
+				if isListingError(st.Err) {
+					// the source listing is incomplete, so no correct plan
+					// can be made from it: report the error and stop.
+					printError(s.fullCommand, s.op, st.Err)
 					cancel()
+					continue
 				}
 				if s.shouldSkipSrcObject(st, true) {
+					continue
+				}
+				// --exclude/--include are relative to the source prefix. An
+				// object filtered out here is never copied; if it also exists
+				// in the destination it becomes "only destination" and the
+				// delete step applies the same filters, so it is kept.
+				if s.isFilteredOut(st.URL.Path, srcurl.Prefix) {
 					continue
 				}
 				filteredSrcObjectChannel <- *st
@@ -407,7 +462,7 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 
 		// read and print the external sort errors
 		for err := range srcErrCh {
-			printError(s.fullCommand, s.op, err)
+			s.reportError(err)
 		}
 	}()
 
@@ -421,14 +476,14 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 			defer close(filteredDstObjectChannel)
 			// filter and redirect objects
 			for dt := range unfilteredDestObjectsChannel {
-				if dt.Err != nil && s.shouldStopSync(dt.Err) {
-					msg := log.ErrorMessage{
-						Err:       cleanupError(dt.Err),
-						Command:   s.fullCommand,
-						Operation: s.op,
-					}
-					log.Error(msg)
+				if isListingError(dt.Err) {
+					// the destination listing is incomplete. Going on would
+					// treat the destination as (partly) empty: every source
+					// object would be copied again and --delete would remove
+					// nothing, or the wrong objects. Report the error and stop.
+					printError(s.fullCommand, s.op, dt.Err)
 					cancel()
+					continue
 				}
 				if s.shouldSkipDstObject(dt, false) {
 					continue
@@ -448,7 +503,7 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 
 		// read and print the external sort errors
 		for err := range dstErrCh {
-			printError(s.fullCommand, s.op, err)
+			s.reportError(err)
 		}
 	}()
 
@@ -471,8 +526,18 @@ func (s Sync) planRun(
 	// Always use raw mode since sync command generates commands
 	// from raw S3 objects. Otherwise, generated copy command will
 	// try to expand given source.
+	//
+	// --exclude and --include (and the patterns read from --exclude-from
+	// and --include-from) are already applied to the source listing,
+	// relative to the source prefix. Omit them from the generated cp
+	// command: a raw URL has no prefix, so cp would match the patterns
+	// against the full path instead.
 	defaultFlags := map[string]interface{}{
-		"raw": true,
+		"raw":          true,
+		"exclude":      nil,
+		"include":      nil,
+		"exclude-from": nil,
+		"include-from": nil,
 	}
 
 	// it should wait until both of the child goroutines for onlySource and common channels
@@ -491,7 +556,11 @@ func (s Sync) planRun(
 				if !ok {
 					return
 				}
-				curDestURL := generateDestinationURL(srcurl, dsturl, isBatch)
+				curDestURL, err := generateDestinationURL(srcurl, dsturl, isBatch)
+				if err != nil {
+					s.reportError(err)
+					continue
+				}
 				command, err := generateCommand(c, "cp", defaultFlags, srcurl, curDestURL)
 				if err != nil {
 					printDebug(s.op, err, srcurl, curDestURL)
@@ -553,10 +622,7 @@ func (s Sync) planRun(
 						// objects filtered out by --exclude/--include are not part
 						// of the sync, so they must not be deleted from the
 						// destination either.
-						if len(s.excludePatterns) > 0 && isURLMatched(s.excludePatterns, d.Path, dsturl.Prefix) {
-							continue
-						}
-						if len(s.includePatterns) > 0 && !isURLMatched(s.includePatterns, d.Path, dsturl.Prefix) {
+						if s.isFilteredOut(d.Path, dsturl.Prefix) {
 							continue
 						}
 						dstURLs = append(dstURLs, d)
@@ -567,7 +633,10 @@ func (s Sync) planRun(
 				}
 			}
 
-			if len(dstURLs) == 0 {
+			// a listing error cancels the context. The objects seen until
+			// then are only part of the picture, so nothing may be deleted
+			// based on them.
+			if ctx.Err() != nil || len(dstURLs) == 0 {
 				return
 			}
 
@@ -575,9 +644,11 @@ func (s Sync) planRun(
 			// the destination prefix. Omit them from the generated rm command,
 			// which would match them against the full object key instead.
 			rmFlags := map[string]interface{}{
-				"raw":     true,
-				"exclude": nil,
-				"include": nil,
+				"raw":          true,
+				"exclude":      nil,
+				"include":      nil,
+				"exclude-from": nil,
+				"include-from": nil,
 			}
 
 			command, err := generateCommand(c, "rm", rmFlags, dstURLs...)
@@ -607,7 +678,7 @@ func (s Sync) planRun(
 
 // generateDestinationURL generates destination url for given
 // source url if it would have been in destination.
-func generateDestinationURL(srcurl, dsturl *url.URL, isBatch bool) *url.URL {
+func generateDestinationURL(srcurl, dsturl *url.URL, isBatch bool) (*url.URL, error) {
 	objname := srcurl.Base()
 	if isBatch {
 		objname = srcurl.Relative()
@@ -615,13 +686,27 @@ func generateDestinationURL(srcurl, dsturl *url.URL, isBatch bool) *url.URL {
 
 	if dsturl.IsRemote() {
 		if dsturl.IsPrefix() || dsturl.IsBucket() {
-			return dsturl.Join(objname)
+			return dsturl.Join(objname), nil
 		}
-		return dsturl.Clone()
+		return dsturl.Clone(), nil
 
 	}
 
-	return dsturl.Join(objname)
+	return dsturl.JoinInside(objname)
+}
+
+// isFilteredOut reports whether the object at path, taken relative to
+// prefix, is left out of the sync by --exclude/--include: it is excluded
+// when an exclude pattern matches, or when include patterns are given and
+// none of them match.
+func (s Sync) isFilteredOut(path, prefix string) bool {
+	if len(s.excludePatterns) > 0 && isURLMatched(s.excludePatterns, path, prefix) {
+		return true
+	}
+	if len(s.includePatterns) > 0 && !isURLMatched(s.includePatterns, path, prefix) {
+		return true
+	}
+	return false
 }
 
 // shouldSkipObject checks is object should be skipped.
@@ -632,15 +717,17 @@ func (s Sync) shouldSkipSrcObject(object *storage.Object, verbose bool) bool {
 
 	if err := object.Err; err != nil {
 		if verbose {
-			printError(s.fullCommand, s.op, err)
+			s.reportError(err)
 		}
 		return true
 	}
 
-	if object.StorageClass.IsGlacier() {
-		if verbose {
+	// Same rules as cp: Glacier objects are skipped and reported as errors
+	// unless the caller forces the transfer or asks to ignore the warnings.
+	if object.StorageClass.IsGlacier() && !s.forceGlacierTransfer {
+		if verbose && !s.ignoreGlacierWarnings {
 			err := fmt.Errorf("object '%v' is on Glacier storage", object)
-			printError(s.fullCommand, s.op, err)
+			s.reportError(err)
 		}
 		return true
 	}
@@ -654,7 +741,7 @@ func (s Sync) shouldSkipDstObject(object *storage.Object, verbose bool) bool {
 
 	if err := object.Err; err != nil {
 		if verbose {
-			printError(s.fullCommand, s.op, err)
+			s.reportError(err)
 		}
 		return true
 	}
@@ -662,16 +749,14 @@ func (s Sync) shouldSkipDstObject(object *storage.Object, verbose bool) bool {
 	return false
 }
 
-// shouldStopSync determines whether a sync process should be stopped or not.
-func (s Sync) shouldStopSync(err error) bool {
-	if err == storage.ErrNoObjectFound {
+// isListingError reports whether err, received while listing the source or
+// the destination, leaves that listing incomplete. An empty listing (no
+// object or no match found) and a cancellation are not errors of that kind.
+// Any other error is, whatever its code: the sync must stop, or it would plan
+// from a partial listing.
+func isListingError(err error) bool {
+	if err == nil || errors.Is(err, storage.ErrNoObjectFound) {
 		return false
 	}
-	if awsErr, ok := err.(awserr.Error); ok {
-		switch awsErr.Code() {
-		case "AccessDenied", "NoSuchBucket", "RequestError", "SerializationError":
-			return true
-		}
-	}
-	return s.exitOnError
+	return !errorpkg.IsCancelation(err)
 }
