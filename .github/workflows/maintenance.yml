@@ -22,6 +22,7 @@ jobs:
           go-version: stable
       - name: Start MinIO
         run: |
+          for _ in 1 2 3; do docker pull -q quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z && break; sleep 10; done
           docker run -d --name minio -p 45677:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
           for _ in $(seq 1 30); do curl -sf http://localhost:45677/minio/health/live && exit 0; sleep 1; done
           docker logs minio; exit 1
