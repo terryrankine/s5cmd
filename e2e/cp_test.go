@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/igungor/gofakes3"
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/fs"
 	"gotest.tools/v3/icmd"
@@ -316,6 +317,87 @@ func TestCopyS3PrefixToLocalMustReturnError(t *testing.T) {
 
 	// assert s3 object
 	assert.Assert(t, ensureS3Object(s3client, bucket, objectpath, content))
+}
+
+// cp s3://bucket/prefix/ dir/  (prefix has a directory-marker object "prefix/")
+//
+// The marker does not turn the prefix into a copyable object: a prefix source
+// still needs a wildcard.
+func TestCopyS3DirectoryMarkerPrefixToLocalMustReturnError(t *testing.T) {
+	t.Parallel()
+
+	var backend gofakes3.Backend
+	s3client, s5cmd := setup(t, withBackend(&backend))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	putDirectoryMarker(t, s3client, backend, bucket, "p/")
+	putFile(t, s3client, bucket, "p/a.txt", "A")
+
+	workdir := fs.NewDir(t, "somedir", fs.WithDir("dest"))
+	defer workdir.Remove()
+
+	cmd := s5cmd("cp", "s3://"+bucket+"/p/", "dest/")
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: equals(`ERROR "cp s3://%v/p/ dest/": source argument must contain wildcard character`, bucket),
+	})
+
+	expected := fs.Expected(t, fs.WithDir("dest"))
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+}
+
+// cp s3://bucket/prefix/* dir/  (directory markers "prefix/", "prefix/sub/",
+// "prefix/empty/")
+//
+// Markers are skipped silently: they are not downloaded (the prefix marker's
+// relative name is "", the destination directory itself), not reported as
+// errors and not counted. A marker with nothing under it creates no local
+// directory.
+// See: https://github.com/peak/s5cmd/issues/517
+func TestCopyS3ObjectsToLocalWithDirectoryMarkers(t *testing.T) {
+	t.Parallel()
+
+	var backend gofakes3.Backend
+	s3client, s5cmd := setup(t, withBackend(&backend))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	putDirectoryMarker(t, s3client, backend, bucket, "p/")
+	putDirectoryMarker(t, s3client, backend, bucket, "p/sub/")
+	putDirectoryMarker(t, s3client, backend, bucket, "p/empty/")
+	putFile(t, s3client, bucket, "p/a.txt", "A")
+	putFile(t, s3client, bucket, "p/sub/b.txt", "BB")
+
+	workdir := fs.NewDir(t, "somedir", fs.WithDir("dest"))
+	defer workdir.Remove()
+
+	cmd := s5cmd("cp", "s3://"+bucket+"/p/*", "dest/")
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp s3://%v/p/a.txt dest/a.txt`, bucket),
+		1: equals(`cp s3://%v/p/sub/b.txt dest/sub/b.txt`, bucket),
+	}, sortInput(true))
+
+	expected := fs.Expected(t,
+		fs.WithDir("dest",
+			fs.WithFile("a.txt", "A"),
+			fs.WithDir("sub",
+				fs.WithFile("b.txt", "BB"),
+			),
+		),
+	)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
 }
 
 // cp --flatten s3://bucket/* dir/ (flat source hierarchy)

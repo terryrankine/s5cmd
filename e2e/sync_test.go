@@ -12,6 +12,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/igungor/gofakes3"
 
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/fs"
@@ -1926,6 +1927,130 @@ func TestSyncS3BucketToLocalWithDelete(t *testing.T) {
 	// assert s3
 	for key, content := range s3Content {
 		assert.Assert(t, ensureS3Object(s3client, bucket, key, content))
+	}
+}
+
+// sync --delete s3://bucket/prefix/* dir/  (directory markers "prefix/",
+// "prefix/sub/", "prefix/empty/")
+//
+// Markers are skipped like in cp: not downloaded, not an error. With --delete
+// they take no part in the plan either: a local file that is not in the
+// source is removed, and nothing else.
+// See: https://github.com/peak/s5cmd/issues/517
+func TestSyncS3ToLocalWithDirectoryMarkers(t *testing.T) {
+	t.Parallel()
+
+	var backend gofakes3.Backend
+	s3client, s5cmd := setup(t, withBackend(&backend))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	putDirectoryMarker(t, s3client, backend, bucket, "p/")
+	putDirectoryMarker(t, s3client, backend, bucket, "p/sub/")
+	putDirectoryMarker(t, s3client, backend, bucket, "p/empty/")
+	putFile(t, s3client, bucket, "p/a.txt", "A")
+	putFile(t, s3client, bucket, "p/sub/b.txt", "BB")
+
+	workdir := fs.NewDir(t, "somedir",
+		fs.WithFile("stale.txt", "D: not in the source"),
+	)
+	defer workdir.Remove()
+
+	src := fmt.Sprintf("s3://%v/p/", bucket)
+	dst := filepath.ToSlash(workdir.Path()) + "/"
+
+	cmd := s5cmd("sync", "--delete", src+"*", dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp %va.txt %va.txt`, src, dst),
+		1: equals(`cp %vsub/b.txt %vsub/b.txt`, src, dst),
+		2: equals(`rm %vstale.txt`, dst),
+	}, sortInput(true))
+
+	expected := fs.Expected(t,
+		fs.WithFile("a.txt", "A"),
+		fs.WithDir("sub",
+			fs.WithFile("b.txt", "BB"),
+		),
+	)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+}
+
+// sync [--delete] dir/ s3://bucket/prefix/  (destination has directory
+// markers "prefix/", "prefix/sub/", "prefix/old/")
+//
+// sync manages files, not folders: a marker in the destination is never
+// deleted, with or without --delete, just as an empty local directory is
+// never removed by "sync --delete s3://bucket/* dir/". "rm --raw" deletes a
+// marker on purpose.
+// See: https://github.com/peak/s5cmd/issues/517
+func TestSyncLocalToS3WithDirectoryMarkersInDestination(t *testing.T) {
+	t.Parallel()
+
+	var backend gofakes3.Backend
+	s3client, s5cmd := setup(t, withBackend(&backend))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	markers := []string{"p/", "p/sub/", "p/old/"}
+	for _, marker := range markers {
+		putDirectoryMarker(t, s3client, backend, bucket, marker)
+	}
+	putFile(t, s3client, bucket, "p/stale.txt", "D: not in the source")
+
+	workdir := fs.NewDir(t, "somedir",
+		fs.WithFile("a.txt", "A"),
+		fs.WithDir("sub",
+			fs.WithFile("b.txt", "BB"),
+		),
+	)
+	defer workdir.Remove()
+
+	src := filepath.ToSlash(workdir.Path()) + "/"
+	dst := fmt.Sprintf("s3://%v/p/", bucket)
+
+	// without --delete: files are uploaded, nothing is removed.
+	cmd := s5cmd("sync", src, dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp %va.txt %va.txt`, src, dst),
+		1: equals(`cp %vsub/b.txt %vsub/b.txt`, src, dst),
+	}, sortInput(true))
+
+	assert.Assert(t, ensureS3Object(s3client, bucket, "p/stale.txt", "D: not in the source"))
+	for _, marker := range markers {
+		assert.Assert(t, s3ObjectExists(t, s3client, backend, bucket, marker), marker)
+	}
+
+	// with --delete: only the stale file goes; the markers stay.
+	cmd = s5cmd("sync", "--delete", src, dst)
+	result = icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`rm %vstale.txt`, dst),
+	})
+
+	assert.Assert(t, ensureS3Object(s3client, bucket, "p/a.txt", "A"))
+	assert.Assert(t, ensureS3Object(s3client, bucket, "p/sub/b.txt", "BB"))
+	assert.Assert(t, !s3ObjectExists(t, s3client, backend, bucket, "p/stale.txt"))
+	for _, marker := range markers {
+		assert.Assert(t, s3ObjectExists(t, s3client, backend, bucket, marker), marker)
 	}
 }
 

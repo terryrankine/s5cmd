@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/igungor/gofakes3"
 	"gotest.tools/v3/fs"
 	"gotest.tools/v3/icmd"
 )
@@ -424,6 +425,94 @@ func TestListSingleNestedS3ObjectWithFullpath(t *testing.T) {
 		1: equals("s3://%v/a/b/c/foo", bucket),
 		2: equals("s3://%v/a/b/c/foobar", bucket),
 	})
+}
+
+// ls s3://bucket/prefix/  (prefix has a directory-marker object "prefix/")
+//
+// The marker names the listed prefix itself, not an entry under it, so it
+// is left out; the real entries are listed as usual.
+// See: https://github.com/peak/s5cmd/issues/517
+func TestListS3PrefixWithDirectoryMarker(t *testing.T) {
+	t.Parallel()
+
+	var backend gofakes3.Backend
+	s3client, s5cmd := setup(t, withBackend(&backend))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	putDirectoryMarker(t, s3client, backend, bucket, "p/")
+	putFile(t, s3client, bucket, "p/a.txt", "A")
+	putFile(t, s3client, bucket, "p/sub/b.txt", "BB")
+
+	cmd := s5cmd("ls", "s3://"+bucket+"/p/")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: suffix("DIR sub/"),
+		1: suffix("1 a.txt"),
+	}, alignment(true))
+}
+
+// ls s3://bucket/prefix/  (prefix holds nothing but its directory marker)
+//
+// An empty "folder" lists as empty: no lines and no "no object found" error.
+func TestListS3EmptyDirectoryMarker(t *testing.T) {
+	t.Parallel()
+
+	var backend gofakes3.Backend
+	s3client, s5cmd := setup(t, withBackend(&backend))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	putDirectoryMarker(t, s3client, backend, bucket, "p/")
+
+	cmd := s5cmd("ls", "s3://"+bucket+"/p/")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+	assertLines(t, result.Stdout(), map[int]compareFunc{})
+}
+
+// ls s3://bucket/prefix/*  (directory markers "prefix/" and "prefix/sub/")
+//
+// Without a delimiter every key under the prefix is listed. The marker of the
+// prefix itself is left out (it used to print as "DIR s3://bucket/prefix/",
+// its relative name being empty); a nested marker is a directory entry.
+// See: https://github.com/peak/s5cmd/issues/517
+func TestListS3WildcardWithDirectoryMarkers(t *testing.T) {
+	t.Parallel()
+
+	var backend gofakes3.Backend
+	s3client, s5cmd := setup(t, withBackend(&backend))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	putDirectoryMarker(t, s3client, backend, bucket, "p/")
+	putDirectoryMarker(t, s3client, backend, bucket, "p/sub/")
+	putFile(t, s3client, bucket, "p/a.txt", "A")
+	putFile(t, s3client, bucket, "p/sub/b.txt", "BB")
+
+	cmd := s5cmd("ls", "s3://"+bucket+"/p/*")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: suffix("1 a.txt"),
+		1: suffix("DIR sub/"),
+		2: suffix("2 sub/b.txt"),
+	}, alignment(true))
 }
 
 // ls bucket/*/object*.ext

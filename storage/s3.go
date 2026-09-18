@@ -185,6 +185,16 @@ func (s *S3) List(ctx context.Context, url *url.URL, _ bool) <-chan *Object {
 	return s.listObjectsV2(ctx, url)
 }
 
+// isListedPrefixMarker reports whether key is the directory-marker object of
+// the prefix being listed: the zero-byte object "p/" that consoles create for
+// a "folder", met while listing "p/" or "p/*". Every other key ending in "/"
+// is listed as a directory (see the listers below); this one names the
+// listing root, not an entry under it, so it is skipped. It still counts as
+// something found: an empty folder lists as empty, not as "no object found".
+func isListedPrefixMarker(url *url.URL, key string) bool {
+	return key == url.Prefix && strings.HasSuffix(key, "/")
+}
+
 func (s *S3) listObjectVersions(ctx context.Context, url *url.URL) <-chan *Object {
 	listInput := s3.ListObjectVersionsInput{
 		Bucket: aws.String(url.Bucket),
@@ -229,6 +239,10 @@ func (s *S3) listObjectVersions(ctx context.Context, url *url.URL) <-chan *Objec
 				// iterate over all versions of the objects (except the delete markers)
 				for _, v := range p.Versions {
 					key := aws.StringValue(v.Key)
+					if isListedPrefixMarker(url, key) {
+						objectFound = true
+						continue
+					}
 					if !url.Match(key) {
 						continue
 					}
@@ -267,6 +281,10 @@ func (s *S3) listObjectVersions(ctx context.Context, url *url.URL) <-chan *Objec
 				// iterate over all delete marker versions of the objects
 				for _, d := range p.DeleteMarkers {
 					key := aws.StringValue(d.Key)
+					if isListedPrefixMarker(url, key) {
+						objectFound = true
+						continue
+					}
 					if !url.Match(key) {
 						continue
 					}
@@ -361,6 +379,10 @@ func (s *S3) listObjectsV2(ctx context.Context, url *url.URL) <-chan *Object {
 
 			for _, c := range p.Contents {
 				key := aws.StringValue(c.Key)
+				if isListedPrefixMarker(url, key) {
+					objectFound = true
+					continue
+				}
 				if !url.Match(key) {
 					continue
 				}
@@ -452,6 +474,10 @@ func (s *S3) listObjects(ctx context.Context, url *url.URL) <-chan *Object {
 
 			for _, c := range p.Contents {
 				key := aws.StringValue(c.Key)
+				if isListedPrefixMarker(url, key) {
+					objectFound = true
+					continue
+				}
 				if !url.Match(key) {
 					continue
 				}
