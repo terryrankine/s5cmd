@@ -14,6 +14,11 @@ Minor and major releases are described here. Patch releases (dependency, securit
 #### Improvements
 - `parallel.Waiter` collects task errors and returns them from `Wait()`; callers no longer drain an error channel in a goroutine. No user-visible change.
 
+#### Bugfixes
+- `sync`, `cp`, `ls`: a local file whose name is not valid UTF-8 (a Latin-1 `é`, say) no longer aborts the directory walk with `error parsing regexp: invalid UTF-8`; before, `sync` uploaded only the files walked until then. (upstream [#751](https://github.com/peak/s5cmd/issues/751))
+- `sync`: a file name or key with a newline in it no longer ends the run; `run` reads a quoted argument across lines as a shell does, and reports a quote left open instead of exiting silently.
+- S3 listings (ListObjectsV2) ask for `encoding-type=url` and decode the keys when the response confirms it, so a key with a character XML cannot carry (a control character) no longer fails the whole listing with `SerializationError`. Servers that ignore the parameter still work.
+
 ## v2.4.2 - 18 Sep 2026
 
 #### Security

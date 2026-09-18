@@ -462,6 +462,108 @@ func TestS3ListError(t *testing.T) {
 	}
 }
 
+// listingServer answers ListObjectsV2 the way S3 does: the keys go into the
+// XML as they are, unless the request asks for encoding-type=url, in which
+// case each is URL-encoded and the page says <EncodingType>url</EncodingType>.
+// A key with a control character in it cannot be carried by XML 1.0, so the
+// SDK fails to parse the unencoded page. When honour is false the server
+// ignores the parameter, as the test fake and some S3 implementations do.
+func listingServer(t *testing.T, keys, prefixes []string, honour bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		encode := honour && r.URL.Query().Get("encoding-type") == "url"
+		name := func(s string) string {
+			if encode {
+				return urlpkg.QueryEscape(s)
+			}
+			return s
+		}
+		var b strings.Builder
+		b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>bucket</Name><KeyCount>1</KeyCount><IsTruncated>false</IsTruncated>`)
+		if encode {
+			b.WriteString(`<EncodingType>url</EncodingType>`)
+		}
+		for _, p := range prefixes {
+			fmt.Fprintf(&b, `<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>`, name(p))
+		}
+		for _, k := range keys {
+			fmt.Fprintf(&b, `<Contents><Key>%s</Key><LastModified>2024-01-01T00:00:00.000Z</LastModified><ETag>"e"</ETag><Size>1</Size><StorageClass>STANDARD</StorageClass></Contents>`, name(k))
+		}
+		b.WriteString(`</ListBucketResult>`)
+		w.Header().Set("Content-Type", "application/xml")
+		io.WriteString(w, b.String())
+	}))
+}
+
+func listingClient(endpoint string) *S3 {
+	api := s3.New(unit.Session, &aws.Config{
+		Endpoint:         aws.String(endpoint),
+		Region:           aws.String("us-east-1"),
+		S3ForcePathStyle: aws.Bool(true),
+		MaxRetries:       aws.Int(0),
+	})
+	return &S3{api: api}
+}
+
+// Keys that XML cannot carry unencoded are listed in full; the request asks
+// S3 to URL-encode them and the keys are decoded from the page.
+func TestS3ListURLEncodedKeys(t *testing.T) {
+	keys := []string{
+		"key/ctrl\x01\x7f.txt",
+		"key/plus+sign %20percent.txt",
+		"key/narrow no-break 日本語 é.png",
+		"key/new\nline.txt",
+	}
+	prefixes := []string{"key/dir 1/", "key/dir+2/"}
+
+	server := listingServer(t, keys, prefixes, true)
+	defer server.Close()
+
+	u, err := url.New("s3://bucket/key/")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	for obj := range listingClient(server.URL).List(context.Background(), u, true) {
+		if obj.Err != nil {
+			t.Fatalf("unexpected error: %v", obj.Err)
+		}
+		got = append(got, obj.URL.Path)
+	}
+
+	want := append(append([]string{}, prefixes...), keys...)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("(-want +got):\n%v", diff)
+	}
+}
+
+// An S3 implementation that ignores encoding-type returns the keys as they
+// are and no EncodingType. Decoding them anyway would turn "+" into a space.
+func TestS3ListKeysWhenServerIgnoresEncodingType(t *testing.T) {
+	keys := []string{"key/plus+sign %20percent.txt"}
+
+	server := listingServer(t, keys, nil, false)
+	defer server.Close()
+
+	u, err := url.New("s3://bucket/key/")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	for obj := range listingClient(server.URL).List(context.Background(), u, true) {
+		if obj.Err != nil {
+			t.Fatalf("unexpected error: %v", obj.Err)
+		}
+		got = append(got, obj.URL.Path)
+	}
+
+	if diff := cmp.Diff(keys, got); diff != "" {
+		t.Errorf("(-want +got):\n%v", diff)
+	}
+}
+
 func TestS3ListNoItemFound(t *testing.T) {
 	url, err := url.New("s3://bucket/key")
 	if err != nil {

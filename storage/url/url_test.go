@@ -356,13 +356,32 @@ func TestCheckMatch(t *testing.T) {
 				"a/b/c.csv": {},
 			},
 		},
+		{
+			// a Latin-1 "é" is not valid UTF-8; regexp rejects it in a
+			// pattern (upstream peak/s5cmd#751)
+			name: "match_if_prefix_is_not_valid_utf8",
+			url:  "s3://bucket/caf\xe9 samedi 31.07.flv",
+			keys: map[string]matchResult{
+				"caf\xe9 samedi 31.07.flv": {true, "caf\xe9 samedi 31.07.flv"},
+				"cafe samedi 31.07.flv":    {},
+				"caf\xe9\xe9 samedi":       {},
+			},
+		},
+		{
+			name: "match_if_wildcard_filter_is_not_valid_utf8",
+			url:  "s3://bucket/dir/*\xe9*.flv",
+			keys: map[string]matchResult{
+				"dir/caf\xe9 samedi.flv": {true, "caf\xe9 samedi.flv"},
+				"dir/cafe samedi.flv":    {},
+			},
+		},
 	}
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			u, err := New(tc.url)
 			if err != nil {
-				t.Errorf("unexpected error %v", err)
+				t.Fatalf("unexpected error %v", err)
 			}
 
 			for key, matchResult := range tc.keys {

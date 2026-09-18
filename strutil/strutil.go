@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 var humanDivisors = [...]struct {
@@ -60,9 +61,32 @@ func AddNewLineFlag(pattern string) string {
 	return "(?s)" + pattern
 }
 
+// QuoteMeta is regexp.QuoteMeta for text that may not be valid UTF-8, such
+// as a file name written by a program that used another encoding. regexp
+// rejects a pattern with invalid UTF-8 in it, yet matches each invalid byte
+// of its input as U+FFFD; so that is what each invalid byte becomes.
+func QuoteMeta(s string) string {
+	s = regexp.QuoteMeta(s)
+	if utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			b.WriteString(`\x{FFFD}`)
+		} else {
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
+}
+
 // WildCardToRegexp converts a wildcarded expresiion to equivalent regular expression
 func WildCardToRegexp(pattern string) string {
-	patternRegex := regexp.QuoteMeta(pattern)
+	patternRegex := QuoteMeta(pattern)
 	patternRegex = strings.Replace(patternRegex, "\\?", ".", -1)
 	return strings.Replace(patternRegex, "\\*", ".*", -1)
 }
