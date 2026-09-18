@@ -2,6 +2,14 @@
 
 Minor and major releases are described here. Patch releases (dependency, security and toolchain updates) are automatic and listed on the [Releases](https://github.com/terryrankine/s5cmd/releases) page with notes generated from their commits.
 
+## Unreleased
+
+#### Features
+- `run --exit-on-error`: stop reading commands after the first one fails and cancel the ones still running. `sync --exit-on-error` now means the same thing for the `cp`/`rm` commands it generates (it had become a no-op in v2.4.1, when listing errors started stopping the sync unconditionally).
+
+#### Improvements
+- `parallel.Waiter` collects task errors and returns them from `Wait()`; callers no longer drain an error channel in a goroutine. No user-visible change.
+
 ## v2.4.2 - 18 Sep 2026
 
 #### Security

@@ -81,7 +81,7 @@ func NewSyncCommandFlags() []cli.Flag {
 		},
 		&cli.BoolFlag{
 			Name:  "exit-on-error",
-			Usage: "stops the sync process if an error is received (kept for backward compatibility: an error while listing the source or the destination always stops the sync)",
+			Usage: "stop after the first cp or rm fails instead of continuing with the remaining objects (an error while listing always stops the sync)",
 		},
 	}
 	sharedFlags := NewSharedFlags()
