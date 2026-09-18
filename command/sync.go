@@ -392,6 +392,13 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 				if s.shouldSkipSrcObject(st, true) {
 					continue
 				}
+				// --exclude/--include are relative to the source prefix. An
+				// object filtered out here is never copied; if it also exists
+				// in the destination it becomes "only destination" and the
+				// delete step applies the same filters, so it is kept.
+				if s.isFilteredOut(st.URL.Path, srcurl.Prefix) {
+					continue
+				}
 				filteredSrcObjectChannel <- *st
 			}
 		}()
@@ -471,8 +478,15 @@ func (s Sync) planRun(
 	// Always use raw mode since sync command generates commands
 	// from raw S3 objects. Otherwise, generated copy command will
 	// try to expand given source.
+	//
+	// --exclude and --include are already applied to the source
+	// listing, relative to the source prefix. Omit them from the
+	// generated cp command: a raw URL has no prefix, so cp would match
+	// the patterns against the full path instead.
 	defaultFlags := map[string]interface{}{
-		"raw": true,
+		"raw":     true,
+		"exclude": nil,
+		"include": nil,
 	}
 
 	// it should wait until both of the child goroutines for onlySource and common channels
@@ -553,10 +567,7 @@ func (s Sync) planRun(
 						// objects filtered out by --exclude/--include are not part
 						// of the sync, so they must not be deleted from the
 						// destination either.
-						if len(s.excludePatterns) > 0 && isURLMatched(s.excludePatterns, d.Path, dsturl.Prefix) {
-							continue
-						}
-						if len(s.includePatterns) > 0 && !isURLMatched(s.includePatterns, d.Path, dsturl.Prefix) {
+						if s.isFilteredOut(d.Path, dsturl.Prefix) {
 							continue
 						}
 						dstURLs = append(dstURLs, d)
@@ -622,6 +633,20 @@ func generateDestinationURL(srcurl, dsturl *url.URL, isBatch bool) *url.URL {
 	}
 
 	return dsturl.Join(objname)
+}
+
+// isFilteredOut reports whether the object at path, taken relative to
+// prefix, is left out of the sync by --exclude/--include: it is excluded
+// when an exclude pattern matches, or when include patterns are given and
+// none of them match.
+func (s Sync) isFilteredOut(path, prefix string) bool {
+	if len(s.excludePatterns) > 0 && isURLMatched(s.excludePatterns, path, prefix) {
+		return true
+	}
+	if len(s.includePatterns) > 0 && !isURLMatched(s.includePatterns, path, prefix) {
+		return true
+	}
+	return false
 }
 
 // shouldSkipObject checks is object should be skipped.
