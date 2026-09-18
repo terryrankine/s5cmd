@@ -1367,6 +1367,105 @@ func TestCopyDirBackslashedToS3(t *testing.T) {
 
 }
 
+// cp "data[2024]/*" s3://bucket/  (source directory name contains glob characters)
+//
+// Only "*" and "?" are wildcards. Up to the first one the path is literal, as
+// it is for S3: a directory named "data[2024]" is not a character class that
+// matches "data2".
+func TestCopyDirWithGlobCharactersInNameToS3(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const dir = "data[2024]"
+
+	folderLayout := []fs.PathOp{
+		fs.WithDir(dir,
+			fs.WithFile("readme.md", "this is a readme file"),
+			fs.WithDir("sub",
+				fs.WithFile("file.txt", "this is a file"),
+			),
+		),
+		fs.WithDir("data2",
+			fs.WithFile("decoy.txt", "must not be copied"),
+		),
+	}
+	workdir := fs.NewDir(t, "somedir", folderLayout...)
+	defer workdir.Remove()
+
+	dstpath := fmt.Sprintf("s3://%v/", bucket)
+
+	cmd := s5cmd("cp", dir+"/*", dstpath)
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp %v/readme.md %vreadme.md`, dir, dstpath),
+		1: equals(`cp %v/sub/file.txt %vsub/file.txt`, dir, dstpath),
+	}, sortInput(true))
+
+	// assert local filesystem
+	expected := fs.Expected(t, folderLayout...)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+
+	// assert s3
+	assert.Assert(t, ensureS3Object(s3client, bucket, "readme.md", "this is a readme file"))
+	assert.Assert(t, ensureS3Object(s3client, bucket, "sub/file.txt", "this is a file"))
+	err := ensureS3Object(s3client, bucket, "decoy.txt", "must not be copied")
+	assertError(t, err, errS3NoSuchKey)
+}
+
+// cp 't\est/*' s3://bucket/  (source directory name contains a backslash)
+//
+// On Unix a backslash is an ordinary character. Before the first wildcard it
+// must not be read as a glob escape, which would look for a "test" directory.
+func TestCopyDirBackslashedWildcardToS3(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a backslash is a path separator on windows")
+	}
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	folderLayout := []fs.PathOp{
+		fs.WithDir(`t\est`,
+			fs.WithFile("filetest.txt", "try reaching me on windows :-)"),
+		),
+		fs.WithDir("test",
+			fs.WithFile("decoy.txt", "must not be copied"),
+		),
+	}
+	workdir := fs.NewDir(t, "somedir", folderLayout...)
+	defer workdir.Remove()
+
+	dstpath := fmt.Sprintf("s3://%v/", bucket)
+
+	cmd := s5cmd("cp", `t\est/*`, dstpath)
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp t\est/filetest.txt %vfiletest.txt`, dstpath),
+	})
+
+	// assert local filesystem
+	expected := fs.Expected(t, folderLayout...)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+
+	// assert s3
+	assert.Assert(t, ensureS3Object(s3client, bucket, "filetest.txt", "try reaching me on windows :-)"))
+	err := ensureS3Object(s3client, bucket, "decoy.txt", "must not be copied")
+	assertError(t, err, errS3NoSuchKey)
+}
+
 // cp --storage-class=GLACIER file s3://bucket/
 func TestCopySingleFileToS3WithStorageClassGlacier(t *testing.T) {
 	t.Parallel()

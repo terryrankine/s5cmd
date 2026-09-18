@@ -77,7 +77,7 @@ func (f *Filesystem) expandGlob(ctx context.Context, src *url.URL, followSymlink
 	go func() {
 		defer close(ch)
 
-		matchedFiles, err := filepath.Glob(src.Absolute())
+		matchedFiles, err := glob(src)
 		if err != nil {
 			sendError(ctx, err, ch)
 			return
@@ -115,6 +115,34 @@ func (f *Filesystem) expandGlob(ctx context.Context, src *url.URL, followSymlink
 		}
 	}()
 	return ch
+}
+
+// glob returns the names of the files and directories matching the wildcard
+// URL src. Like an S3 listing, it takes the path up to the first wildcard
+// literally: the pattern is matched under the directory that holds the
+// wildcard, so that a directory named "data[2024]" or, on Unix, "back\slash"
+// is found as it is instead of being read as a character class or an escape
+// (upstream #810). Only the part of the path from the first wildcard on keeps
+// the glob syntax, as filepath.Glob applied it to the whole path before.
+func glob(src *url.URL) ([]string, error) {
+	pattern := src.Absolute()
+	// src.Prefix is the path up to the first wildcard. On Windows it keeps
+	// the separators as typed while the path has been slashed, so take the
+	// literal part from the path itself.
+	root, _ := filepath.Split(pattern[:min(len(src.Prefix), len(pattern))])
+	sub := pattern[len(root):]
+	if root == "" {
+		root = "."
+	}
+
+	matches, err := fs.Glob(os.DirFS(root), sub)
+	if err != nil {
+		return nil, err
+	}
+	for i, match := range matches {
+		matches[i] = filepath.Join(root, match)
+	}
+	return matches, nil
 }
 
 func walkDir(ctx context.Context, fs *Filesystem, src *url.URL, followSymlinks bool, fn func(o *Object)) {

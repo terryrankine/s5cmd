@@ -9,6 +9,7 @@ Minor and major releases are described here. Patch releases (dependency, securit
 
 #### Bugfixes
 - `ls`: the directory-marker object of the listed prefix (the zero-byte `prefix/` key the console creates for a "folder") is no longer printed as an entry of its own listing: `ls s3://bucket/prefix/` showed `DIR prefix/` and `ls s3://bucket/prefix/*` showed `DIR s3://bucket/prefix/`. An empty folder now lists as empty, not as "no object found". Nested markers are still listed as `DIR`; `cp`, `sync` and `du` skip markers as before. (upstream [#517](https://github.com/peak/s5cmd/issues/517))
+- Local wildcards take the path up to the first `*` or `?` literally, as S3 wildcards do. A directory named `data[2024]` (or `back\slash` on Unix) used to be read as a glob character class or escape and match nothing: `sync s3://bucket/* data[2024]/` copied everything again on every run and `--delete` removed nothing, and `cp 'data[2024]/*' s3://bucket/` failed with `no match found`. From the first wildcard on, the glob syntax is unchanged. (upstream [#810](https://github.com/peak/s5cmd/issues/810))
 
 #### Improvements
 - `parallel.Waiter` collects task errors and returns them from `Wait()`; callers no longer drain an error channel in a goroutine. No user-visible change.
