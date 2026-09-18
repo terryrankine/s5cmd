@@ -35,7 +35,7 @@ jobs:
         run: |
           sha=$(git rev-parse HEAD)
           for _ in $(seq 1 60); do
-            state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --jq '[.check_runs[] | select(.name | startswith("build") or startswith("test") or startswith("qa"))] | if length == 0 then "none" elif all(.status == "completed") then (if all(.conclusion == "success") then "pass" else "fail" end) else "pending" end')
+            state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --jq '[.check_runs[] | select(.name == "ci-ok" or .name == "codespell")] | if length < 2 then "pending" elif all(.status == "completed") then (if all(.conclusion == "success") then "pass" else "fail" end) else "pending" end')
             echo "ci: $state"
             case "$state" in
               pass) exit 0 ;;
