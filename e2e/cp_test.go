@@ -225,6 +225,31 @@ func TestCopySingleS3ObjectToLocalWithDestinationWildcard(t *testing.T) {
 	assert.Assert(t, ensureS3Object(s3client, bucket, filename, content))
 }
 
+// cp s3://bucket/missing.txt .
+func TestCopyMissingS3ObjectToLocalLeavesNoTempFile(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const filename = "missing.txt"
+
+	cmd := s5cmd("cp", "s3://"+bucket+"/"+filename, ".")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: contains(`ERROR "cp s3://%v/%v %v": NoSuchKey:`, bucket, filename, filename),
+	})
+
+	// the temporary download file must be removed on failure
+	expected := fs.Expected(t)
+	assert.Assert(t, fs.Equal(cmd.Dir, expected))
+}
+
 // cp s3://bucket/prefix/ dir/
 func TestCopyS3PrefixToLocalMustReturnError(t *testing.T) {
 	t.Parallel()
