@@ -82,15 +82,15 @@ changelog:
       - Merge branch
 
 brews:
-  - # Only the upstream project can push to its tap; forks skip the upload.
-    skip_upload: '{{ ne (envOrDefault "GITHUB_REPOSITORY_OWNER" "peak") "peak" }}'
+  - # Each owner publishes to its own <owner>/homebrew-tap, so a fork's
+    # release never touches upstream's tap.
     repository:
-      owner: peak
+      owner: '{{ envOrDefault "GITHUB_REPOSITORY_OWNER" "peak" }}'
       name: homebrew-tap
     directory: Formula
     name: s5cmd
     description: Parallel S3 and local filesystem execution tool
-    homepage: https://github.com/peak/s5cmd
+    homepage: 'https://github.com/{{ envOrDefault "GITHUB_REPOSITORY" "peak/s5cmd" }}'
     license: MIT
     test: |
       system "#{bin}/s5cmd version"
