@@ -461,8 +461,11 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 		}
 
 		// read and print the external sort errors
+		// a sort error leaves the sorted source incomplete; like a listing
+		// error it must stop the sync, or --delete would plan from it.
 		for err := range srcErrCh {
 			s.reportError(err)
+			cancel()
 		}
 	}()
 
@@ -504,6 +507,7 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 		// read and print the external sort errors
 		for err := range dstErrCh {
 			s.reportError(err)
+			cancel()
 		}
 	}()
 

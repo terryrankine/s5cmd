@@ -697,10 +697,14 @@ func TestJoinInside(t *testing.T) {
 		{base: "dest", join: "../b.txt", escapes: true},
 		{base: "dest", join: "a/../../b.txt", escapes: true},
 		{base: "dest", join: "..", escapes: true},
+		{base: "dest", join: ".", escapes: true},
+		{base: "dest", join: "a/..", escapes: true},
+		{base: ".", join: ".", escapes: true},
 		{base: "dest", join: "../dest2/b.txt", escapes: true},
 		{base: ".", join: "a/b.txt", want: "a/b.txt"},
 		{base: ".", join: "../b.txt", escapes: true},
 		{base: "/", join: "../b.txt", want: "/b.txt"},
+		{base: "/", join: ".", escapes: true},
 		{base: "s3://bucket/prefix/", join: "../b.txt", want: "prefix/../b.txt"},
 	}
 

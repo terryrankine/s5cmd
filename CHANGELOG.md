@@ -1,4 +1,16 @@
 # Changelog
+## Unreleased
+
+#### Security
+- `cp`/`sync`: an object key that names the destination directory itself (e.g. `prefix/.`) is now rejected like a traversal. It used to be written as a temp file *beside* the destination and left there after the rename failed. Found by a security review of v2.4.1; attacker controls content, not the file name, and cannot overwrite existing files.
+- `sync`: an external-sort error on either side now stops the sync like a listing error, so `--delete` cannot plan from a partially sorted listing.
+
+#### Bugfixes
+- `cp`: the temp file is removed when the final rename fails, not only when the download fails.
+
+#### Testing
+- `parallel` package: tests for worker-count normalisation, the concurrency bound, error delivery and the drain-before-Wait contract (6% → 91% coverage); `Run` now panics with a clear message on a nil task/waiter or after `Close`; `Close` and `Waiter.Wait` are idempotent.
+
 ## v2.4.1 - 18 Sep 2026
 
 #### Security

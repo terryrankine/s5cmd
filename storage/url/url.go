@@ -215,11 +215,14 @@ func (u *URL) JoinInside(s string) (*URL, error) {
 	base := path.Clean(u.Path)
 	target := clone.Path // already cleaned by path.Join
 
+	// A key may never name the destination directory itself either: an
+	// object whose relative name cleans to "." would be written as a temp
+	// file beside the destination and then fail to rename over it.
 	var escapes bool
 	if base == "." {
-		escapes = target == ".." || strings.HasPrefix(target, "../")
+		escapes = target == "." || target == ".." || strings.HasPrefix(target, "../")
 	} else {
-		escapes = target != base && !strings.HasPrefix(target, strings.TrimSuffix(base, "/")+"/")
+		escapes = target == base || !strings.HasPrefix(target, strings.TrimSuffix(base, "/")+"/")
 	}
 	if escapes {
 		return nil, fmt.Errorf("object key %q escapes destination %q", s, u.Path)
