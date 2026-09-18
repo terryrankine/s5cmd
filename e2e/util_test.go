@@ -754,6 +754,35 @@ func putStorageClass(storageClass string) putOption {
 	}
 }
 
+// assertS3Keys asserts that the bucket holds exactly the keys of want (the
+// map values are ignored). It catches stray objects that ensureS3Object,
+// which only looks up the keys it is given, would miss.
+func assertS3Keys(t *testing.T, client *s3.S3, bucket string, want map[string]string) {
+	t.Helper()
+
+	var got []string
+	err := client.ListObjectsPages(&s3.ListObjectsInput{Bucket: aws.String(bucket)}, func(p *s3.ListObjectsOutput, _ bool) bool {
+		for _, c := range p.Contents {
+			got = append(got, aws.StringValue(c.Key))
+		}
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := make([]string, 0, len(want))
+	for key := range want {
+		expected = append(expected, key)
+	}
+	sort.Strings(expected)
+	sort.Strings(got)
+
+	if diff := cmp.Diff(expected, got); diff != "" {
+		t.Errorf("s3 keys in %v: (-want +got):\n%v", bucket, diff)
+	}
+}
+
 func putFile(t *testing.T, client *s3.S3, bucket string, filename string, content string, opts ...putOption) {
 	t.Helper()
 	input := &s3.PutObjectInput{

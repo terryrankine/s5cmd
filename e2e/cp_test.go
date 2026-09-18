@@ -2715,6 +2715,125 @@ func TestCopyLocalFileToS3WithSameFilenameWithNoClobber(t *testing.T) {
 	assert.Assert(t, ensureS3Object(s3client, bucket, filename, content))
 }
 
+// cp -n dir/sub s3://bucket/prefix/ (all objects exist)
+//
+// Regression test for upstream peak/s5cmd#718, which reported that a local
+// directory given without a trailing slash was re-uploaded as "file.jpeg.jpeg"
+// instead of being skipped. Not reproduced; the test pins the correct behaviour.
+func TestCopyLocalDirectoryWithoutSlashToS3WithNoClobberAllExist(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const (
+		content    = "this is the content"
+		newContent = content + "\n"
+	)
+
+	// objects already exist at the destination.
+	existing := map[string]string{
+		"uploads/images/2022/01/file01.jpeg": content,
+		"uploads/images/2022/01/file02.jpeg": content,
+	}
+	for key, body := range existing {
+		putFile(t, s3client, bucket, key, body)
+	}
+
+	// local files are modified, they must still be skipped.
+	folderLayout := []fs.PathOp{
+		fs.WithDir("2022",
+			fs.WithDir("01",
+				fs.WithFile("file01.jpeg", newContent),
+				fs.WithFile("file02.jpeg", newContent),
+			),
+		),
+	}
+
+	workdir := fs.NewDir(t, t.Name(), folderLayout...)
+	defer workdir.Remove()
+
+	src := "2022/01"
+	dst := fmt.Sprintf("s3://%v/uploads/images/2022/", bucket)
+
+	cmd := s5cmd("--log=debug", "cp", "-n", "--acl", "public-read", src, dst)
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`DEBUG "cp %v/file01.jpeg %v01/file01.jpeg": object already exists`, src, dst),
+		1: equals(`DEBUG "cp %v/file02.jpeg %v01/file02.jpeg": object already exists`, src, dst),
+	}, sortInput(true))
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	// assert local filesystem
+	expected := fs.Expected(t, folderLayout...)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+
+	// existing objects are untouched and nothing else was created.
+	for key, body := range existing {
+		assert.Assert(t, ensureS3Object(s3client, bucket, key, body))
+	}
+	assertS3Keys(t, s3client, bucket, existing)
+}
+
+// cp -n dir/sub s3://bucket/prefix/ (no objects exist)
+func TestCopyLocalDirectoryWithoutSlashToS3WithNoClobberNoneExist(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const content = "this is the content"
+
+	folderLayout := []fs.PathOp{
+		fs.WithDir("2022",
+			fs.WithDir("01",
+				fs.WithFile("file01.jpeg", content),
+				fs.WithFile("file02.jpeg", content),
+			),
+		),
+	}
+
+	workdir := fs.NewDir(t, t.Name(), folderLayout...)
+	defer workdir.Remove()
+
+	src := "2022/01"
+	dst := fmt.Sprintf("s3://%v/uploads/images/2022/", bucket)
+
+	cmd := s5cmd("cp", "-n", src, dst)
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp %v/file01.jpeg %v01/file01.jpeg`, src, dst),
+		1: equals(`cp %v/file02.jpeg %v01/file02.jpeg`, src, dst),
+	}, sortInput(true))
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	// assert local filesystem
+	expected := fs.Expected(t, folderLayout...)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+
+	// assert s3: uploaded to the right keys, and only those keys.
+	expectedS3Content := map[string]string{
+		"uploads/images/2022/01/file01.jpeg": content,
+		"uploads/images/2022/01/file02.jpeg": content,
+	}
+	for key, body := range expectedS3Content {
+		assert.Assert(t, ensureS3Object(s3client, bucket, key, body))
+	}
+	assertS3Keys(t, s3client, bucket, expectedS3Content)
+}
+
 // cp -n file s3://bucket
 func TestCopyLocalFileToS3WithNoClobber(t *testing.T) {
 	t.Parallel()
