@@ -1,6 +1,7 @@
 package parallel
 
 import (
+	"errors"
 	"runtime"
 	"sync"
 )
@@ -76,7 +77,7 @@ func (p *Manager) Run(fn Task, waiter *Waiter) {
 		defer p.release()
 
 		if err := fn(); err != nil {
-			waiter.errch <- err
+			waiter.record(err)
 		}
 	}()
 }
@@ -97,27 +98,49 @@ func (p *Manager) Close() {
 
 // Waiter is a structure for waiting and reading
 // error messages created by Manager.
+// Waiter waits for a set of tasks and collects their errors. An optional
+// handler sees each error as it happens, from the task's goroutine, so
+// callers can print immediately or cancel the rest of the work; the
+// collected errors are returned by Wait, so nothing needs to be drained.
 type Waiter struct {
-	wg    sync.WaitGroup
-	errch chan error
-	once  sync.Once
+	wg      sync.WaitGroup
+	mu      sync.Mutex
+	errs    []error
+	onError func(error)
 }
 
-// NewWaiter creates a new parallel.Waiter.
-func NewWaiter() *Waiter {
-	return &Waiter{
-		errch: make(chan error),
+// WaiterOption configures a Waiter.
+type WaiterOption func(*Waiter)
+
+// WithErrorHandler calls fn for every task error as it occurs. fn runs on
+// the task's goroutine and may be called concurrently.
+func WithErrorHandler(fn func(error)) WaiterOption {
+	return func(w *Waiter) { w.onError = fn }
+}
+
+// NewWaiter creates a new Waiter.
+func NewWaiter(opts ...WaiterOption) *Waiter {
+	w := &Waiter{}
+	for _, opt := range opts {
+		opt(w)
+	}
+	return w
+}
+
+func (w *Waiter) record(err error) {
+	w.mu.Lock()
+	w.errs = append(w.errs, err)
+	w.mu.Unlock()
+	if w.onError != nil {
+		w.onError(err)
 	}
 }
 
-// Wait blocks until the WaitGroup counter is zero
-// and closes error channel.
-func (w *Waiter) Wait() {
+// Wait blocks until every task submitted with this waiter has finished and
+// returns their errors joined, or nil. It may be called more than once.
+func (w *Waiter) Wait() error {
 	w.wg.Wait()
-	w.once.Do(func() { close(w.errch) })
-}
-
-// Err returns read-only error channel.
-func (w *Waiter) Err() <-chan error {
-	return w.errch
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return errors.Join(w.errs...)
 }

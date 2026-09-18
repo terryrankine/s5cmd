@@ -3,7 +3,7 @@ package parallel
 import (
 	"errors"
 	"runtime"
-	"sync"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -59,14 +59,9 @@ func TestRunBoundsConcurrency(t *testing.T) {
 		}, w)
 	}
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for range w.Err() {
-		}
-	}()
-	w.Wait()
-	<-done
+	if err := w.Wait(); err != nil {
+		t.Fatal(err)
+	}
 	m.Close()
 
 	if maxInFlight != workers {
@@ -74,28 +69,18 @@ func TestRunBoundsConcurrency(t *testing.T) {
 	}
 }
 
-func TestWaiterDeliversEveryError(t *testing.T) {
+func TestWaiterCollectsEveryError(t *testing.T) {
 	t.Parallel()
 
 	m := New(4)
-	w := NewWaiter()
 
-	// Drain Err before submitting: a failing task blocks on the unbuffered
-	// error channel, and with the pool full that would block Run itself.
-	var got int
-	var mu sync.Mutex
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for err := range w.Err() {
-			mu.Lock()
-			got++
-			mu.Unlock()
-			if err == nil {
-				t.Error("received a nil error")
-			}
+	var handled int64
+	w := NewWaiter(WithErrorHandler(func(err error) {
+		if err == nil {
+			t.Error("handler received a nil error")
 		}
-	}()
+		atomic.AddInt64(&handled, 1)
+	}))
 
 	want := 5
 	for i := 0; i < 10; i++ {
@@ -108,41 +93,54 @@ func TestWaiterDeliversEveryError(t *testing.T) {
 		}, w)
 	}
 
-	w.Wait() // closes Err() once every task has finished
-	<-done
+	err := w.Wait()
 	m.Close()
 
+	if err == nil {
+		t.Fatal("expected Wait to return the task errors")
+	}
+	var got int
+	for _, e := range strings.Split(err.Error(), "\n") {
+		if e == "task failed" {
+			got++
+		}
+	}
 	if got != want {
-		t.Fatalf("expected %d errors, got %d", want, got)
+		t.Fatalf("expected %d errors joined, got %d: %v", want, got, err)
+	}
+	if handled != int64(want) {
+		t.Fatalf("expected the handler to see %d errors, got %d", want, handled)
 	}
 }
 
-// Err is unbuffered: a task that returns an error blocks until someone reads
-// it, so the error channel must be drained concurrently with Wait. This test
-// documents that contract; a caller that only calls Wait would deadlock.
-func TestWaiterErrIsUnbuffered(t *testing.T) {
+// A failing task must never block: errors are recorded, not sent on a
+// channel, so submitting more tasks than workers with no reader is fine.
+func TestFailingTasksDoNotBlockSubmission(t *testing.T) {
 	t.Parallel()
 
 	m := New(2)
 	w := NewWaiter()
-
-	finished := make(chan struct{})
-	m.Run(func() error { return errors.New("blocked until read") }, w)
-	go func() {
-		w.Wait()
-		close(finished)
-	}()
-
-	select {
-	case <-finished:
-		t.Fatal("Wait returned before the error was read")
-	case <-time.After(50 * time.Millisecond):
+	for i := 0; i < 20; i++ {
+		m.Run(func() error { return errors.New("boom") }, w)
 	}
-
-	if err := <-w.Err(); err == nil {
-		t.Fatal("expected the task's error")
+	if err := w.Wait(); err == nil {
+		t.Fatal("expected errors")
 	}
-	<-finished
+	m.Close()
+}
+
+func TestWaitWithNoErrorsReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	m := New(2)
+	w := NewWaiter()
+	m.Run(func() error { return nil }, w)
+	if err := w.Wait(); err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if err := w.Wait(); err != nil {
+		t.Fatalf("second Wait: expected nil, got %v", err)
+	}
 	m.Close()
 }
 
@@ -160,16 +158,13 @@ func TestCloseWaitsForRunningTasks(t *testing.T) {
 			return nil
 		}, w)
 	}
-	go func() {
-		for range w.Err() {
-		}
-	}()
-
 	m.Close()
 	if n := atomic.LoadInt64(&finished); n != 4 {
 		t.Fatalf("Close returned with %d of 4 tasks finished", n)
 	}
-	w.Wait()
+	if err := w.Wait(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRunGuards(t *testing.T) {
@@ -201,10 +196,11 @@ func TestWaitIsIdempotent(t *testing.T) {
 	m := New(2)
 	w := NewWaiter()
 	m.Run(func() error { return nil }, w)
-	w.Wait()
-	w.Wait() // must not panic with "close of closed channel"
-	if _, open := <-w.Err(); open {
-		t.Fatal("expected Err to be closed after Wait")
+	if err := w.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Wait(); err != nil {
+		t.Fatal(err)
 	}
 	m.Close()
 }

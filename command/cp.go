@@ -471,28 +471,15 @@ func (c Copy) Run(ctx context.Context) error {
 
 	c.progressbar.Start()
 	defer c.progressbar.Finish()
-	waiter := parallel.NewWaiter()
+	var merrorObjects error
 
-	var (
-		merrorWaiter  error
-		merrorObjects error
-		errDoneCh     = make(chan struct{})
-	)
-
-	go func() {
-		defer close(errDoneCh)
-		for err := range waiter.Err() {
-			if strings.Contains(err.Error(), "too many open files") {
-				fmt.Fprintln(os.Stderr, strings.TrimSpace(fdlimitWarning))
-				printError(c.fullCommand, c.op, err)
-				merrorWaiter = multierror.Append(merrorWaiter, err)
-				cancel()
-				continue
-			}
-			printError(c.fullCommand, c.op, err)
-			merrorWaiter = multierror.Append(merrorWaiter, err)
+	waiter := parallel.NewWaiter(parallel.WithErrorHandler(func(err error) {
+		if strings.Contains(err.Error(), "too many open files") {
+			fmt.Fprintln(os.Stderr, strings.TrimSpace(fdlimitWarning))
+			cancel()
 		}
-	}()
+		printError(c.fullCommand, c.op, err)
+	}))
 
 	isBatch := c.src.IsWildcard()
 	if !isBatch && !c.src.IsRemote() {
@@ -603,8 +590,7 @@ func (c Copy) Run(ctx context.Context) error {
 		}
 		parallel.Run(task, waiter)
 	}
-	waiter.Wait()
-	<-errDoneCh
+	merrorWaiter := waiter.Wait()
 
 	return multierror.Append(merrorWaiter, merrorObjects).ErrorOrNil()
 }

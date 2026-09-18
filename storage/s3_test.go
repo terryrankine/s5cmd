@@ -1594,7 +1594,6 @@ func TestS3MultiDeleteConcurrency(t *testing.T) {
 		name          string
 		numWorkers    int
 		wantInFlight  int
-		requestDelay  time.Duration
 		blockUntilAll bool
 	}{
 		{
@@ -1609,11 +1608,14 @@ func TestS3MultiDeleteConcurrency(t *testing.T) {
 		},
 		{
 			// with fewer workers than chunks the in-flight requests must
-			// never exceed -numworkers.
-			name:         "in-flight requests are bounded by numworkers",
-			numWorkers:   2,
-			wantInFlight: 2,
-			requestDelay: 100 * time.Millisecond,
+			// never exceed -numworkers. Each request blocks until two are in
+			// flight, so the peak is observed deterministically rather than
+			// depending on timing: a serial implementation times out, one
+			// that ignores the bound reports a peak above 2.
+			name:          "in-flight requests are bounded by numworkers",
+			numWorkers:    2,
+			wantInFlight:  2,
+			blockUntilAll: true,
 		},
 	}
 
@@ -1657,7 +1659,6 @@ func TestS3MultiDeleteConcurrency(t *testing.T) {
 						t.Errorf("timed out waiting for %d concurrent DeleteObjects requests", tc.wantInFlight)
 					}
 				}
-				time.Sleep(tc.requestDelay)
 
 				deleted := make([]*s3.DeletedObject, 0, len(input.Delete.Objects))
 				for _, o := range input.Delete.Objects {
