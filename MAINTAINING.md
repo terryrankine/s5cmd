@@ -15,11 +15,11 @@ This fork exists to ship fixes upstream (`peak/s5cmd`) has not merged. The goal 
 
 | Bump | When | Who |
 |---|---|---|
-| **patch** `vX.Y.Z+1` | dependency, security and toolchain updates | **automatic** — merging a `dependabot/*` or `maintenance/*` PR tags and publishes |
+| **patch** `vX.Y.Z+1` | dependency, security and toolchain updates | **automatic** — merging a `dependabot/*` or `maintenance/*` PR tags and publishes; release notes are generated from the commit messages (`fix:`/`feat:`/`deps:` prefixes), so write them well |
 | **minor** `vX.Y+1.0` | features, behaviour changes, Go floor bump | you: edit `CHANGELOG.md` (`## Unreleased` → version + date), `git tag -a vX.Y.0`, push the tag |
 | **major** | breaking CLI changes | you, same steps |
 
-Tags are unsigned; commits are signed. `master` is protected by a ruleset: changes land only through a PR with green `ci-ok` (the whole build/test/qa matrix) and `codespell` checks, no force-pushes, no bypass — the automation obeys the same rule, which is why it tags first and records the CHANGELOG through an auto-merged PR. A tag push runs `goreleaser.yml`: build → **draft** release → smoke test of the uploaded Linux binary with the e2e suite (including the path-traversal guard) → publish with the CHANGELOG section as notes → `docker.yml` pushes `ghcr.io/<owner>/s5cmd:<tag>` and `:latest`.
+Tags are unsigned; commits are signed. `master` is protected by a ruleset: changes land only through a PR with green `ci-ok` (the whole build/test/qa matrix) and `codespell` checks, no force-pushes, no bypass — the automation obeys the same rule: it only pushes tags. A tag push runs `goreleaser.yml`: build → **draft** release → smoke test of the uploaded Linux binary with the e2e suite (including the path-traversal guard) → publish with the hand-written CHANGELOG section as notes if one exists, else the generated notes → `docker.yml` pushes `ghcr.io/<owner>/s5cmd:<tag>` and `:latest`.
 
 ## What runs by itself
 
@@ -30,7 +30,7 @@ Tags are unsigned; commits are signed. `master` is protected by a ruleset: chang
 | `maintenance.yml` → `govulncheck` | Mondays | reachable-vulnerability scan; opens a `maintenance/security-*` PR that bumps deps, or a `needs-human` issue if only a Go bump fixes it |
 | `maintenance.yml` → `go-drift` | Mondays | new Go major → PR moving "current" in CI, goreleaser and Dockerfile |
 | Dependabot | Mondays / monthly | `aws-sdk-go`, `golang.org/x/*`, Docker base images, Actions, tools module |
-| `auto-release.yml` | on merge of `dependabot/*` or `maintenance/*` | waits for green CI on master, tags the next patch, then opens a docs-only `maintenance/changelog-*` PR that auto-merges — nothing is ever pushed to master directly |
+| `auto-release.yml` | on merge of `dependabot/*` or `maintenance/*` | waits for green CI on master, tags the next patch; nothing is pushed to master |
 | `goreleaser.yml` | on tag | build, smoke, publish |
 | `docker.yml` | on publish | multi-arch image to GHCR |
 

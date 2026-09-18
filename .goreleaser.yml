@@ -52,12 +52,32 @@ checksum:
 snapshot:
   version_template: "{{ .Tag }}"
 
+# Release notes for automatic patch releases are generated from the commits
+# since the previous tag, grouped by conventional prefix. Minor and major
+# releases use the hand-written CHANGELOG.md section instead.
 changelog:
+  use: git
   sort: asc
+  groups:
+    - title: Security
+      regexp: '^.*?(security|CVE|govulncheck).*$'
+      order: 0
+    - title: Features
+      regexp: '^feat(\(.*\))?:'
+      order: 1
+    - title: Fixes
+      regexp: '^fix(\(.*\))?:'
+      order: 2
+    - title: Dependencies and toolchain
+      regexp: '^(deps|ci|chore|build)(\(.*\))?:'
+      order: 3
+    - title: Other
+      order: 999
   filters:
     exclude:
       - '^docs:'
       - '^test:'
+      - '^changelog:'
       - Merge pull request
       - Merge branch
 
