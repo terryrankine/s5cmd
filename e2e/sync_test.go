@@ -4171,3 +4171,133 @@ func TestSyncS3BucketToLocalWithDeleteAndStat(t *testing.T) {
 		assert.Assert(t, ensureS3Object(s3client, bucket, key, content))
 	}
 }
+
+// sync dir/ s3://bucket/
+//
+// upstream peak/s5cmd#751: one file whose name is not valid UTF-8 (a Latin-1
+// "é", as left behind by an old application) made url.New fail with "error
+// parsing regexp: invalid UTF-8", which stopped the directory walk. sync
+// then uploaded only the files seen so far. A name with a newline broke the
+// generated cp line in two, which ended the run.
+func TestSyncLocalFolderWithAwkwardFileNamesToS3(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "darwin" {
+		// APFS refuses file names that are not valid UTF-8 ("illegal byte
+		// sequence"), so the Latin-1 name below cannot exist there.
+		t.Skip("macOS file systems reject non-UTF-8 file names")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows file names are UTF-16: they cannot hold invalid UTF-8 or a newline")
+	}
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	content := map[string]string{
+		"aaa first.txt":                     "first",
+		"caf\xe9 samedi 31.07.flv":          "latin-1 e-acute",
+		"new\nline.txt":                     "newline",
+		"it's \"quoted\" $and\\ back`slash": "shell characters",
+		"glob*star?mark.txt":                "glob characters",
+		"plus+sign %20percent":              "url characters",
+		"narrow no-break 日本語 é 🎉.png":       "unicode",
+		"ctrl\x01\x7fchars":                 "control characters",
+		"zzz last.txt":                      "last",
+	}
+
+	var layout []fs.PathOp
+	for name, body := range content {
+		layout = append(layout, fs.WithFile(name, body))
+	}
+	workdir := fs.NewDir(t, "somedir", layout...)
+	defer workdir.Remove()
+
+	src := workdir.Path() + "/"
+	dst := fmt.Sprintf("s3://%v/", bucket)
+
+	cmd := s5cmd("sync", src, dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	for name, body := range content {
+		assert.Assert(t, ensureS3Object(s3client, bucket, name, body), "key %q", name)
+	}
+
+	// A second sync finds nothing to do for the keys the fake can list:
+	// its listing is plain XML, in which Go writes an invalid byte and a
+	// control character as U+FFFD, and it ignores encoding-type=url. Real
+	// S3 honours it; see TestS3ListURLEncodedKeys in the storage package.
+	cmd = s5cmd("sync", src, dst)
+	result = icmd.RunCmd(cmd)
+	result.Assert(t, icmd.Success)
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+	for name := range content {
+		if name == "caf\xe9 samedi 31.07.flv" || name == "ctrl\x01\x7fchars" {
+			continue
+		}
+		assert.Assert(t, !strings.Contains(result.Stdout(), name), "%q was copied again:\n%s", name, result.Stdout())
+	}
+}
+
+// sync s3://bucket/* s3://dstbucket/
+//
+// The planned cp commands travel through the run command as shell-quoted
+// text. Every key must come out the other end unchanged, including one that
+// holds a newline: the shell-quoted form of that key spans two lines.
+func TestSyncS3BucketToS3BucketKeysWithShellCharacters(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	dstbucket := s3BucketFromTestNameWithPrefix(t, "dst")
+
+	createBucket(t, s3client, bucket)
+	createBucket(t, s3client, dstbucket)
+
+	content := map[string]string{
+		"aaa first.txt":                  "first",
+		"new\nline.txt":                  "newline",
+		"dir/it's \"quoted\" $and `tick": "shell characters",
+		"glob*star?mark.txt":             "glob characters",
+		"plus+sign %20percent":           "url characters",
+		"narrow no-break 日本語 é 🎉.png":    "unicode",
+		" leading and trailing space ":   "spaces",
+		"zzz last.txt":                   "last",
+	}
+	if runtime.GOOS != "windows" {
+		// url.Join turns a backslash into a slash on Windows, meant for local
+		// relative paths; it does so for remote keys too. That is a separate,
+		// Windows-only bug.
+		content["dir/back\\slash"] = "backslash"
+	}
+
+	for key, body := range content {
+		putFile(t, s3client, bucket, key, body)
+	}
+
+	src := fmt.Sprintf("s3://%v/*", bucket)
+	dst := fmt.Sprintf("s3://%v/", dstbucket)
+
+	cmd := s5cmd("sync", src, dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	for key, body := range content {
+		assert.Assert(t, ensureS3Object(s3client, dstbucket, key, body), "key %q", key)
+	}
+	assertS3Keys(t, s3client, dstbucket, content)
+
+	cmd = s5cmd("sync", src, dst)
+	result = icmd.RunCmd(cmd)
+	result.Assert(t, icmd.Success)
+	assertLines(t, result.Stdout(), map[int]compareFunc{})
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+}

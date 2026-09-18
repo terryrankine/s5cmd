@@ -337,6 +337,11 @@ func (s *S3) listObjectsV2(ctx context.Context, url *url.URL) <-chan *Object {
 		Bucket:       aws.String(url.Bucket),
 		Prefix:       aws.String(url.Prefix),
 		RequestPayer: s.RequestPayer(),
+		// A key may hold characters that XML 1.0 cannot carry, such as
+		// control characters. Without this S3 puts them in the listing as
+		// they are, and the SDK fails to parse the page: the listing ends
+		// there. See listedKey for the decoding.
+		EncodingType: aws.String(s3.EncodingTypeUrl),
 	}
 
 	if url.StartAfter != "" {
@@ -356,8 +361,14 @@ func (s *S3) listObjectsV2(ctx context.Context, url *url.URL) <-chan *Object {
 		var now time.Time
 
 		err := s.api.ListObjectsV2PagesWithContext(ctx, &listInput, func(p *s3.ListObjectsV2Output, lastPage bool) bool {
+			encoded := aws.StringValue(p.EncodingType) == s3.EncodingTypeUrl
+
 			for _, c := range p.CommonPrefixes {
-				prefix := aws.StringValue(c.Prefix)
+				prefix, err := listedKey(aws.StringValue(c.Prefix), encoded)
+				if err != nil {
+					objCh <- &Object{Err: err}
+					continue
+				}
 				if !url.Match(prefix) {
 					continue
 				}
@@ -378,7 +389,11 @@ func (s *S3) listObjectsV2(ctx context.Context, url *url.URL) <-chan *Object {
 			}
 
 			for _, c := range p.Contents {
-				key := aws.StringValue(c.Key)
+				key, err := listedKey(aws.StringValue(c.Key), encoded)
+				if err != nil {
+					objCh <- &Object{Err: err}
+					continue
+				}
 				if isListedPrefixMarker(url, key) {
 					objectFound = true
 					continue
@@ -399,7 +414,7 @@ func (s *S3) listObjectsV2(ctx context.Context, url *url.URL) <-chan *Object {
 				}
 
 				newurl := url.Clone()
-				newurl.Path = aws.StringValue(c.Key)
+				newurl.Path = key
 				etag := aws.StringValue(c.ETag)
 
 				objCh <- &Object{
@@ -427,6 +442,27 @@ func (s *S3) listObjectsV2(ctx context.Context, url *url.URL) <-chan *Object {
 	}()
 
 	return objCh
+}
+
+// listedKey returns a key (or common prefix) from a listing page as it is
+// stored. When the request asked for EncodingType url, S3 URL-encodes every
+// key in the page (a space becomes "+") and says so in the page's
+// EncodingType. Some S3 implementations, the test fake among them, ignore
+// the request and return the keys as they are; their pages carry no
+// EncodingType, so their keys are left alone.
+//
+// Only ListObjectsV2 asks for the encoding. The SDK paginates ListObjects
+// and ListObjectVersions with the last key of a page, which it would send
+// back still encoded.
+func listedKey(key string, encoded bool) (string, error) {
+	if !encoded {
+		return key, nil
+	}
+	decoded, err := urlpkg.QueryUnescape(key)
+	if err != nil {
+		return "", fmt.Errorf("decode listed key %q: %w", key, err)
+	}
+	return decoded, nil
 }
 
 // listObjects is used for cloud services that does not support S3

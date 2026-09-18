@@ -1,6 +1,9 @@
 package strutil
 
-import "testing"
+import (
+	"regexp"
+	"testing"
+)
 
 func TestCapitalizeFirstLetter(t *testing.T) {
 	tests := []struct {
@@ -89,6 +92,50 @@ func TestHumanizeBytes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := HumanizeBytes(tt.arg); got != tt.want {
 				t.Errorf("HumanizeBytes() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestQuoteMeta(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		in    string
+		want  string
+		match string // input the compiled pattern must match
+	}{
+		{
+			name:  "valid utf-8 is regexp.QuoteMeta",
+			in:    "a.b*c 日本語",
+			want:  `a\.b\*c 日本語`,
+			match: "a.b*c 日本語",
+		},
+		{
+			name:  "each invalid byte becomes U+FFFD",
+			in:    "caf\xe9.flv\xff\xfe",
+			want:  `caf\x{FFFD}\.flv\x{FFFD}\x{FFFD}`,
+			match: "caf\xe9.flv\xff\xfe",
+		},
+		{
+			name:  "truncated multibyte sequence",
+			in:    "\xe6\x97",
+			want:  `\x{FFFD}\x{FFFD}`,
+			match: "\xe6\x97",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := QuoteMeta(tt.in)
+			if got != tt.want {
+				t.Errorf("QuoteMeta() = %q, want %q", got, tt.want)
+			}
+			re, err := regexp.Compile("^" + got + "$")
+			if err != nil {
+				t.Fatalf("QuoteMeta() output does not compile: %v", err)
+			}
+			if !re.MatchString(tt.match) {
+				t.Errorf("%q does not match %q", got, tt.match)
 			}
 		})
 	}

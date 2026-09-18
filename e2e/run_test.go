@@ -433,3 +433,54 @@ func TestRunExitOnError(t *testing.T) {
 		t.Fatalf("expected all %d commands to run without --exit-on-error, got %d", numFiles, listed)
 	}
 }
+
+// run reads shell-quoted commands line by line. A quoted argument that holds
+// a newline spans two lines of input, as it does for a shell; the sync
+// command writes such lines for keys with a newline in them.
+func TestRunQuotedArgumentSpanningLines(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	putFile(t, s3client, bucket, "new\nline.txt", "content")
+	putFile(t, s3client, bucket, "other.txt", "other")
+
+	input := strings.NewReader(strings.Join([]string{
+		fmt.Sprintf("cp 's3://%v/new\nline.txt' s3://%v/copy-single.txt", bucket, bucket),
+		fmt.Sprintf("cp \"s3://%v/new\nline.txt\" s3://%v/copy-double.txt", bucket, bucket),
+		fmt.Sprintf("cp s3://%v/other.txt s3://%v/copy-other.txt", bucket, bucket),
+	}, "\n"))
+
+	cmd := s5cmd("run")
+	result := icmd.RunCmd(cmd, icmd.WithStdin(input))
+
+	result.Assert(t, icmd.Success)
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	assert.Assert(t, ensureS3Object(s3client, bucket, "copy-single.txt", "content"))
+	assert.Assert(t, ensureS3Object(s3client, bucket, "copy-double.txt", "content"))
+	assert.Assert(t, ensureS3Object(s3client, bucket, "copy-other.txt", "other"))
+}
+
+// A quote left open at the end of the input is still an error.
+func TestRunUnterminatedQuote(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	input := strings.NewReader(fmt.Sprintf("ls 's3://%v/\n", bucket))
+
+	cmd := s5cmd("run")
+	result := icmd.RunCmd(cmd, icmd.WithStdin(input))
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: contains("Unterminated single-quoted string"),
+	})
+}

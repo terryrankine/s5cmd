@@ -308,7 +308,7 @@ func (u *URL) setPrefixAndFilter() error {
 	if u.filter != "" {
 		filterRegex = strutil.WildCardToRegexp(u.filter)
 	}
-	filterRegex = regexp.QuoteMeta(u.Prefix) + filterRegex
+	filterRegex = strutil.QuoteMeta(u.Prefix) + filterRegex
 	filterRegex = strutil.MatchFromStartToEnd(filterRegex)
 	filterRegex = strutil.AddNewLineFlag(filterRegex)
 	r, err := regexp.Compile(filterRegex)

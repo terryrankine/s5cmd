@@ -433,7 +433,7 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 				if isListingError(st.Err) {
 					// the source listing is incomplete, so no correct plan
 					// can be made from it: report the error and stop.
-					printError(s.fullCommand, s.op, st.Err)
+					s.reportError(st.Err)
 					cancel()
 					continue
 				}
@@ -484,7 +484,7 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 					// treat the destination as (partly) empty: every source
 					// object would be copied again and --delete would remove
 					// nothing, or the wrong objects. Report the error and stop.
-					printError(s.fullCommand, s.op, dt.Err)
+					s.reportError(dt.Err)
 					cancel()
 					continue
 				}

@@ -110,23 +110,38 @@ func (r Run) Run(ctx context.Context) error {
 
 	reader := NewReader(ctx, r.reader)
 
+	// A quoted argument may hold a newline: an object key or file name with
+	// one in it is written by sync as 'first line
+	// second line'. Like a shell, keep reading until the quote closes.
+	// pending holds the lines read so far of such a command.
+	var pending string
+	var parseErr error
+
 	lineno := -1
-	for line := range reader.Read() {
+	for raw := range reader.Read() {
 		lineno++
 
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
+		line := strings.TrimSpace(pending + raw)
+		if pending == "" {
+			if line == "" {
+				continue
+			}
 
-		// skip comment lines
-		if strings.HasPrefix(line, "#") {
-			continue
+			// skip comment lines
+			if strings.HasPrefix(line, "#") {
+				continue
+			}
 		}
 
 		fields, err := shellquote.Split(line)
+		if isUnterminatedQuote(err) {
+			pending += raw
+			continue
+		}
+		pending = ""
 		if err != nil {
-			return err
+			parseErr = fmt.Errorf("line %v: %w", lineno, err)
+			break
 		}
 
 		if len(fields) == 0 {
@@ -163,6 +178,19 @@ func (r Run) Run(ctx context.Context) error {
 		pm.Run(fn, waiter)
 	}
 
+	if parseErr == nil && pending != "" {
+		// the input ended inside a quoted argument
+		_, err := shellquote.Split(strings.TrimSpace(pending))
+		parseErr = fmt.Errorf("line %v: %w", lineno, err)
+	}
+	if parseErr != nil {
+		// nothing after a line that cannot be parsed is run, whatever
+		// --exit-on-error says: the input is not what it looks like.
+		printError(commandFromContext(r.c), r.c.Command.Name, parseErr)
+		stopped.Store(true)
+		cancel()
+	}
+
 	merrorWaiter := waiter.Wait()
 
 	readErr := reader.Err()
@@ -175,7 +203,15 @@ func (r Run) Run(ctx context.Context) error {
 		printError(commandFromContext(r.c), r.c.Command.Name, readErr)
 	}
 
-	return multierror.Append(merrorWaiter, readErr).ErrorOrNil()
+	return multierror.Append(merrorWaiter, readErr, parseErr).ErrorOrNil()
+}
+
+// isUnterminatedQuote reports whether shellquote.Split stopped at the end of
+// a line inside a quoted or escaped argument, which the next line may finish.
+func isUnterminatedQuote(err error) bool {
+	return errors.Is(err, shellquote.UnterminatedSingleQuoteError) ||
+		errors.Is(err, shellquote.UnterminatedDoubleQuoteError) ||
+		errors.Is(err, shellquote.UnterminatedEscapeError)
 }
 
 // Reader is a cancelable reader.
@@ -212,7 +248,12 @@ func (r *Reader) read() {
 			// it returns the data read before the error and the error itself (often io.EOF).
 			line, err := r.ReadString('\n')
 			if line != "" {
-				r.linech <- line
+				select {
+				case r.linech <- line:
+				case <-r.ctx.Done():
+					r.err = r.ctx.Err()
+					return
+				}
 			}
 			if err != nil {
 				if err == io.EOF {
