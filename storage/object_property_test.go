@@ -40,10 +40,11 @@ func TestPropertyObjectBytesRoundTrip(t *testing.T) {
 			mode = os.ModeDir
 		}
 		obj := Object{
-			URL:     u,
-			ModTime: &mod,
-			Size:    rapid.Int64Range(0, 1<<40).Draw(rt, "size"),
-			Type:    ObjectType{mode},
+			URL:          u,
+			ModTime:      &mod,
+			Size:         rapid.Int64Range(0, 1<<40).Draw(rt, "size"),
+			Type:         ObjectType{mode},
+			StorageClass: StorageClass(rapid.SampledFrom([]string{"", "STANDARD", "GLACIER", "DEEP_ARCHIVE"}).Draw(rt, "class")),
 		}
 
 		data, err := obj.ToBytes()
@@ -63,6 +64,9 @@ func TestPropertyObjectBytesRoundTrip(t *testing.T) {
 		}
 		if !back.ModTime.Equal(*obj.ModTime) {
 			rt.Fatalf("modtime %v became %v", obj.ModTime, back.ModTime)
+		}
+		if back.StorageClass != obj.StorageClass {
+			rt.Fatalf("storage class %q became %q", obj.StorageClass, back.StorageClass)
 		}
 		if back.Type.IsDir() != obj.Type.IsDir() {
 			rt.Fatalf("type dir=%v became dir=%v", obj.Type.IsDir(), back.Type.IsDir())

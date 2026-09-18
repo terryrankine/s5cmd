@@ -1249,14 +1249,12 @@ func TestSyncS3BucketToS3BucketIsStorageClassChanging(t *testing.T) {
 	cmd := s5cmd("sync", src, dst)
 	result := icmd.RunCmd(cmd)
 
-	// there will be no stdout, since there are no changes; the Glacier
-	// objects are skipped and reported, so the exit code is non-zero
-	result.Assert(t, icmd.Expected{ExitCode: 1})
+	// nothing to copy: every destination object is current. The Glacier
+	// objects in the source need no restoring for that, so they are not
+	// reported (they used to be, and the sync exited 1 for no change).
+	result.Assert(t, icmd.Success)
 	assertLines(t, result.Stdout(), map[int]compareFunc{})
-	assertLines(t, result.Stderr(), map[int]compareFunc{
-		0: equals(`ERROR "sync %v %v": object '%v/testfile3.txt' is on Glacier storage`, src, dst, bucketPath),
-		1: equals(`ERROR "sync %v %v": object '%v/testfile4.txt' is on Glacier storage`, src, dst, bucketPath),
-	}, sortInput(true))
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
 
 	// assert s3 objects in source
 	for _, sc := range storageClassesAndFile {
@@ -1400,13 +1398,11 @@ func TestSyncS3BucketToLocalFolderIsStorageClassChanging(t *testing.T) {
 	cmd := s5cmd("sync", src, dst)
 	result := icmd.RunCmd(cmd)
 
-	// there will be no stdout; the Glacier object is skipped and reported,
-	// so the exit code is non-zero
-	result.Assert(t, icmd.Expected{ExitCode: 1})
+	// nothing to copy: the local files are newer. The Glacier object needs
+	// no restoring for that, so it is not reported.
+	result.Assert(t, icmd.Success)
 	assertLines(t, result.Stdout(), map[int]compareFunc{})
-	assertLines(t, result.Stderr(), map[int]compareFunc{
-		0: equals(`ERROR "sync %v %v": object '%v/testfile2.txt' is on Glacier storage`, src, dst, bucketPath),
-	})
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
 
 	expectedFiles := []fs.PathOp{
 		fs.WithFile("testfile1.txt", "this is a test file"),
@@ -1714,22 +1710,19 @@ func TestSyncS3BucketToS3BucketWithDeleteStorageClass(t *testing.T) {
 
 	result := icmd.RunCmd(cmd)
 
-	// the source is empty: the deletes still run, but the "no object found"
-	// error is reported and the exit code is non-zero
+	// the source matched nothing: "no object found" is reported and
+	// --delete removes nothing, whatever the storage class (the deletes
+	// used to run, emptying the destination).
 	result.Assert(t, icmd.Expected{ExitCode: 1})
 	assertLines(t, result.Stderr(), map[int]compareFunc{
 		0: equals(`ERROR "sync --delete=true %v %v": no object found`, src, dst),
+		1: equals(`ERROR "sync --delete=true %v %v": nothing is deleted from the destination: the source matched no object (use rm to empty the destination)`, src, dst),
 	})
-
-	assertLines(t, result.Stdout(), map[int]compareFunc{
-		0: equals(`rm %vtestfile1.txt`, dst),
-		1: equals(`rm %vtestfile2.txt`, dst),
-	}, sortInput(true))
+	assertLines(t, result.Stdout(), map[int]compareFunc{})
 
 	// assert s3 objects in destination
 	for _, sc := range dstStorageClassesAndFile {
-		err := ensureS3Object(s3client, dstbucket, sc.filename, sc.content, ensureStorageClass(sc.storageClass))
-		assertError(t, err, errS3NoSuchKey)
+		assert.Assert(t, ensureS3Object(s3client, dstbucket, sc.filename, sc.content, ensureStorageClass(sc.storageClass)))
 	}
 }
 
@@ -1766,17 +1759,17 @@ func TestSyncLocalFolderToS3BucketWithDeleteStorageClass(t *testing.T) {
 
 	result := icmd.RunCmd(cmd)
 
-	result.Assert(t, icmd.Success)
-
-	assertLines(t, result.Stdout(), map[int]compareFunc{
-		0: equals(`rm %vtestfile1.txt`, dst),
-		1: equals(`rm %vtestfile2.txt`, dst),
-	}, sortInput(true))
+	// the local source directory is empty: --delete removes nothing,
+	// whatever the storage class (it used to empty the bucket, exit 0).
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+	assertLines(t, result.Stdout(), map[int]compareFunc{})
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: equals(`ERROR "sync --delete=true %v %v": nothing is deleted from the destination: the source matched no object (use rm to empty the destination)`, src, dst),
+	})
 
 	// assert s3 objects in destination
 	for _, sc := range storageClassesAndFile {
-		err := ensureS3Object(s3client, bucket, sc.filename, sc.content, ensureStorageClass(sc.storageClass))
-		assertError(t, err, errS3NoSuchKey)
+		assert.Assert(t, ensureS3Object(s3client, bucket, sc.filename, sc.content, ensureStorageClass(sc.storageClass)))
 	}
 }
 
@@ -3652,8 +3645,11 @@ func TestIssue435(t *testing.T) {
 
 	createBucket(t, s3client, bucket)
 
-	// empty folder
-	folderLayout := []fs.PathOp{}
+	// one file on both sides, older locally so that it is not copied: a
+	// source that matches nothing deletes nothing (design decision DD-8),
+	// and the point here is the number of deletions
+	timestamp := fs.WithTimestamps(time.Now().Add(-time.Minute), time.Now().Add(-time.Minute))
+	folderLayout := []fs.PathOp{fs.WithFile("keep.txt", "S: keep", timestamp)}
 
 	workdir := fs.NewDir(t, "somedir", folderLayout...)
 	defer workdir.Remove()
@@ -3663,6 +3659,7 @@ func TestIssue435(t *testing.T) {
 	filenameFunc := func(i int) string { return fmt.Sprintf("file_%06d", i) }
 	contentFunc := func(i int) string { return fmt.Sprintf("file body %06d", i) }
 
+	putFile(t, s3client, bucket, "keep.txt", "S: keep")
 	for i := 0; i < filecount; i++ {
 		filename := filenameFunc(i)
 		content := contentFunc(i)
@@ -3680,9 +3677,12 @@ func TestIssue435(t *testing.T) {
 
 	assertLines(t, result.Stderr(), map[int]compareFunc{})
 
-	expected := make(map[int]compareFunc)
+	// --log debug: the file that needs no copy is explained first
+	expected := map[int]compareFunc{
+		0: contains(`DEBUG "sync %vkeep.txt %vkeep.txt": object is newer or same age and object size matches`, src, dst),
+	}
 	for i := 0; i < filecount; i++ {
-		expected[i] = contains("rm s3://%v/file_%06d", bucket, i)
+		expected[i+1] = contains("rm s3://%v/file_%06d", bucket, i)
 	}
 
 	assertLines(t, result.Stdout(), expected, sortInput(true))
@@ -3695,6 +3695,7 @@ func TestIssue435(t *testing.T) {
 		err := ensureS3Object(s3client, bucket, filename, content)
 		assertError(t, err, errS3NoSuchKey)
 	}
+	assert.Assert(t, ensureS3Object(s3client, bucket, "keep.txt", "S: keep"))
 }
 
 // sync s3://bucket/* s3://bucket/ (dest bucket is empty)
@@ -4765,4 +4766,130 @@ func TestSyncS3BucketToS3BucketWithDeleteManyObjects(t *testing.T) {
 		err := ensureS3Object(s3client, dstbucket, key, "D: only in destination")
 		assertError(t, err, errS3NoSuchKey)
 	}
+}
+
+// sync --delete s3://src/* s3://dst/ (some source objects are on Glacier)
+//
+// A Glacier object is in the source, so its copy in the destination is
+// current and --delete keeps it. It used to be left out of the comparison,
+// which made the copy look stale: --ignore-glacier-warnings --delete
+// removed the only readable copy, and without the flag every Glacier
+// object stopped --delete altogether. The object is reported only when a
+// copy would be needed, as for "newer.txt" here.
+func TestSyncS3BucketToS3BucketWithDeleteKeepsGlacierCopies(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	timeSource := newFixedTimeSource(now)
+	s3client, s5cmd := setup(t, withTimeSource(timeSource))
+
+	srcbucket := s3BucketFromTestName(t)
+	dstbucket := s3BucketFromTestNameWithPrefix(t, "dst")
+	createBucket(t, s3client, srcbucket)
+	createBucket(t, s3client, dstbucket)
+
+	// The clock runs from three minutes ago up to now: objects with a
+	// modification time in the future are left out of listings.
+	//
+	// destination copies first, so that they are older than the source
+	timeSource.Advance(-3 * time.Minute)
+	putFile(t, s3client, dstbucket, "cold.txt", "S: cold")
+	putFile(t, s3client, dstbucket, "newer.txt", "S: old")
+	timeSource.Advance(time.Minute)
+	putFile(t, s3client, srcbucket, "newer.txt", "S: newer", putStorageClass("GLACIER"))
+	putFile(t, s3client, srcbucket, "only.txt", "S: only", putStorageClass("GLACIER"))
+	putFile(t, s3client, srcbucket, "warm.txt", "S: warm")
+	timeSource.Advance(time.Minute)
+	putFile(t, s3client, srcbucket, "cold.txt", "S: cold", putStorageClass("GLACIER"))
+	timeSource.Advance(time.Minute)
+	// the destination copy of cold.txt is newer than its Glacier source
+	putFile(t, s3client, dstbucket, "cold.txt", "S: cold")
+
+	src := fmt.Sprintf("s3://%v/*", srcbucket)
+	dst := fmt.Sprintf("s3://%v/", dstbucket)
+
+	for _, tc := range []struct {
+		name  string
+		flags []string
+		code  int
+		errs  map[int]compareFunc
+	}{
+		{
+			name:  "reported",
+			flags: []string{"--delete"},
+			code:  1,
+			errs: map[int]compareFunc{
+				0: equals(`ERROR "sync --delete=true %v %v": object 's3://%v/newer.txt' is on Glacier storage`, src, dst, srcbucket),
+				1: equals(`ERROR "sync --delete=true %v %v": object 's3://%v/only.txt' is on Glacier storage`, src, dst, srcbucket),
+			},
+		},
+		{
+			name:  "ignored",
+			flags: []string{"--delete", "--ignore-glacier-warnings"},
+			code:  0,
+			errs:  map[int]compareFunc{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// undo the previous run: stale.txt back, warm.txt gone
+			putFile(t, s3client, dstbucket, "stale.txt", "S: stale")
+			_, err := s3client.DeleteObject(&s3.DeleteObjectInput{Bucket: aws.String(dstbucket), Key: aws.String("warm.txt")})
+			assert.NilError(t, err)
+
+			args := append([]string{"sync"}, tc.flags...)
+			args = append(args, src, dst)
+			result := icmd.RunCmd(s5cmd(args...))
+
+			result.Assert(t, icmd.Expected{ExitCode: tc.code})
+			assertLines(t, result.Stderr(), tc.errs, sortInput(true))
+			assertLines(t, result.Stdout(), map[int]compareFunc{
+				0: equals(`cp s3://%v/warm.txt %vwarm.txt`, srcbucket, dst),
+				1: equals(`rm %vstale.txt`, dst),
+			}, sortInput(true))
+
+			// the Glacier objects' copies are kept, only the stale file is gone
+			assert.Assert(t, ensureS3Object(s3client, dstbucket, "cold.txt", "S: cold"))
+			assert.Assert(t, ensureS3Object(s3client, dstbucket, "newer.txt", "S: old"))
+			assert.Assert(t, ensureS3Object(s3client, dstbucket, "warm.txt", "S: warm"))
+			err = ensureS3Object(s3client, dstbucket, "only.txt", "S: only")
+			assertError(t, err, errS3NoSuchKey)
+			err = ensureS3Object(s3client, dstbucket, "stale.txt", "S: stale")
+			assertError(t, err, errS3NoSuchKey)
+		})
+	}
+}
+
+// sync --delete s3://bucket/nothing/* dir/ (the source matches no object)
+//
+// A source that matches nothing is more often a typo or a wrong bucket than
+// a wish to empty the destination. The sync reports "no object found" as
+// before, and --delete removes nothing (rsync refuses a missing source the
+// same way). Emptying a destination is what rm is for.
+func TestSyncS3ToLocalWithDeleteRefusesEmptySource(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+	putFile(t, s3client, bucket, "elsewhere/file.txt", "S: file")
+
+	workdir := fs.NewDir(t, "somedir", fs.WithFile("keep.txt", "S: keep"))
+	defer workdir.Remove()
+
+	src := fmt.Sprintf("s3://%v/nothing/*", bucket)
+	dst := filepath.ToSlash(workdir.Path()) + "/"
+
+	cmd := s5cmd("sync", "--delete", src, dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+	assertLines(t, result.Stdout(), map[int]compareFunc{})
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: equals(`ERROR "sync --delete=true %v %v": no object found`, src, dst),
+		1: equals(`ERROR "sync --delete=true %v %v": nothing is deleted from the destination: the source matched no object (use rm to empty the destination)`, src, dst),
+	})
+
+	expected := fs.Expected(t, fs.WithFile("keep.txt", "S: keep"))
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
 }

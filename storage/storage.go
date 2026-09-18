@@ -268,6 +268,10 @@ func (o Object) ToBytes() ([]byte, error) {
 	if err := enc.Encode(o.Size); err != nil {
 		return nil, err
 	}
+	// sync decides after the sort whether an object can be read at all
+	if err := enc.Encode(string(o.StorageClass)); err != nil {
+		return nil, err
+	}
 	return buf.Bytes(), nil
 }
 
@@ -294,6 +298,11 @@ func FromBytes(data []byte) (Object, error) {
 	if err := dec.Decode(&o.Size); err != nil {
 		return Object{}, err
 	}
+	var class string
+	if err := dec.Decode(&class); err != nil {
+		return Object{}, err
+	}
+	o.StorageClass = StorageClass(class)
 	return o, nil
 }
 

@@ -173,6 +173,10 @@ type syncErrors struct {
 	// skippedSrc counts the source objects that were listed but could not
 	// be synced. --delete removes nothing while it is non-zero, see planRun.
 	skippedSrc int
+	// srcListed counts the source objects that were listed and readable,
+	// before --include/--exclude. --delete removes nothing while it is
+	// zero, see planRun.
+	srcListed int
 }
 
 func (e *syncErrors) add(err error) {
@@ -194,6 +198,18 @@ func (e *syncErrors) skippedSrcCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.skippedSrc
+}
+
+func (e *syncErrors) addSrcListed() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.srcListed++
+}
+
+func (e *syncErrors) srcListedCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.srcListed
 }
 
 // err summarises the recorded errors, or returns nil if there were none.
@@ -342,9 +358,9 @@ func (s Sync) reportSkippedSrc(err error) {
 // sourceObjects and destObjects channels are already sorted in ascending order.
 // Returns objects those in only source, only destination
 // and both.
-func compareObjects(sourceObjects, destObjects chan *storage.Object, isSrcBatch bool) (chan *url.URL, chan *url.URL, chan *ObjectPair) {
+func compareObjects(sourceObjects, destObjects chan *storage.Object, isSrcBatch bool) (chan *storage.Object, chan *url.URL, chan *ObjectPair) {
 	var (
-		srcOnly   = make(chan *url.URL, extsortChannelBufferSize)
+		srcOnly   = make(chan *storage.Object, extsortChannelBufferSize)
 		dstOnly   = make(chan *url.URL, extsortChannelBufferSize)
 		commonObj = make(chan *ObjectPair, extsortChannelBufferSize)
 		srcName   string
@@ -372,7 +388,7 @@ func compareObjects(sourceObjects, destObjects chan *storage.Object, isSrcBatch 
 
 			if srcOk && dstOk {
 				if srcName < dstName {
-					srcOnly <- src.URL
+					srcOnly <- src
 					src, srcOk = <-sourceObjects
 				} else if srcName == dstName { // if there is a match.
 					commonObj <- &ObjectPair{src: src, dst: dst}
@@ -383,7 +399,7 @@ func compareObjects(sourceObjects, destObjects chan *storage.Object, isSrcBatch 
 					dst, dstOk = <-destObjects
 				}
 			} else if srcOk {
-				srcOnly <- src.URL
+				srcOnly <- src
 				src, srcOk = <-sourceObjects
 			} else if dstOk {
 				dstOnly <- dst.URL
@@ -475,6 +491,7 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 				if s.shouldSkipSrcObject(st, true) {
 					continue
 				}
+				s.errs.addSrcListed()
 				// --exclude/--include are relative to the source prefix. An
 				// object filtered out here is never copied; if it also exists
 				// in the destination it becomes "only destination" and the
@@ -553,7 +570,8 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 func (s Sync) planRun(
 	ctx context.Context,
 	c *cli.Context,
-	onlySource, onlyDest chan *url.URL,
+	onlySource chan *storage.Object,
+	onlyDest chan *url.URL,
 	common chan *ObjectPair,
 	dsturl *url.URL,
 	strategy SyncStrategy,
@@ -591,10 +609,14 @@ func (s Sync) planRun(
 			select {
 			case <-ctx.Done():
 				return
-			case srcurl, ok := <-onlySource:
+			case srcObject, ok := <-onlySource:
 				if !ok {
 					return
 				}
+				if s.isUnreadableGlacier(srcObject) {
+					continue
+				}
+				srcurl := srcObject.URL
 				curDestURL, err := generateDestinationURL(srcurl, dsturl, isBatch)
 				if err != nil {
 					s.reportError(err)
@@ -627,6 +649,9 @@ func (s Sync) planRun(
 				err := strategy.ShouldSync(sourceObject, destObject) // check if object should be copied.
 				if err != nil {
 					printDebug(s.op, err, curSourceURL, curDestURL)
+					continue
+				}
+				if s.isUnreadableGlacier(sourceObject) {
 					continue
 				}
 
@@ -695,6 +720,11 @@ func (s Sync) planRun(
 			fmt.Fprintln(w, command)
 		}
 
+		// A source that matched nothing is more often a typo, a wrong bucket
+		// or a lost mount than a wish to empty the destination: refuse to
+		// delete anything, as rsync refuses a missing source. Objects left
+		// out by --exclude count as matched: the user named them.
+		//
 		// A source object skipped with an error (a dangling symlink, an
 		// unreadable file) is not in the source stream, so its copy in the
 		// destination looks stale and would be deleted; behind a symlink
@@ -714,8 +744,14 @@ func (s Sync) planRun(
 				}
 				if !checked {
 					checked = true
+					var refuse error
 					if n := s.errs.skippedSrcCount(); n > 0 {
-						s.reportError(fmt.Errorf("nothing is deleted from the destination: %d source object(s) skipped with an error", n))
+						refuse = fmt.Errorf("nothing is deleted from the destination: %d source object(s) skipped with an error", n)
+					} else if s.errs.srcListedCount() == 0 {
+						refuse = errors.New("nothing is deleted from the destination: the source matched no object (use rm to empty the destination)")
+					}
+					if refuse != nil {
+						s.reportError(refuse)
 						for range onlyDest {
 							// drain so the comparison can finish
 						}
@@ -791,16 +827,26 @@ func (s Sync) shouldSkipSrcObject(object *storage.Object, verbose bool) bool {
 		return true
 	}
 
-	// Same rules as cp: Glacier objects are skipped and reported as errors
-	// unless the caller forces the transfer or asks to ignore the warnings.
-	if object.StorageClass.IsGlacier() && !s.forceGlacierTransfer {
-		if verbose && !s.ignoreGlacierWarnings {
-			err := fmt.Errorf("object '%v' is on Glacier storage", object)
-			s.reportSkippedSrc(err)
-		}
-		return true
-	}
+	// A Glacier object stays in the comparison: it is in the source, so
+	// its copy in the destination is current and --delete must keep it.
+	// Whether it can be read is decided when a copy is needed, see
+	// isUnreadableGlacier.
 	return false
+}
+
+// isUnreadableGlacier reports whether object is on Glacier storage and the
+// sync must not read it, and reports the object as an error unless the user
+// asked to ignore Glacier warnings. It is asked only when a copy is due:
+// an object already present and current in the destination is not touched,
+// so it does not need restoring.
+func (s Sync) isUnreadableGlacier(object *storage.Object) bool {
+	if !object.StorageClass.IsGlacier() || s.forceGlacierTransfer {
+		return false
+	}
+	if !s.ignoreGlacierWarnings {
+		s.reportError(fmt.Errorf("object '%v' is on Glacier storage", object))
+	}
+	return true
 }
 
 func (s Sync) shouldSkipDstObject(object *storage.Object, verbose bool) bool {
