@@ -771,6 +771,61 @@ func TestSyncLocalFolderToS3BucketSourceNewer(t *testing.T) {
 	}
 }
 
+// sync folder/ s3://bucket with s5cmd running in a non-UTC zone.
+//
+// Same instant-versus-wall-clock check as
+// TestCopyLocalToS3IfSourceNewerComparesInstantsAcrossTimezones, for the sync
+// path: it lists both sides and round-trips every mtime through the external
+// sort before comparing (upstream #845).
+func TestSyncLocalFolderToS3BucketComparesInstantsAcrossTimezones(t *testing.T) {
+	t.Parallel()
+
+	zones := []string{"Australia/Perth", "America/New_York", "Europe/Copenhagen"}
+	for _, zone := range zones {
+		t.Run(zone, func(t *testing.T) {
+			t.Parallel()
+
+			now := time.Now()
+			timeSource := newFixedTimeSource(now)
+			s3client, s5cmd := setup(t, withTimeSource(timeSource))
+
+			bucket := s3BucketFromTestName(t)
+			createBucket(t, s3client, bucket)
+
+			// 30 minutes either side of the S3 stamp: less than any zone's
+			// offset. Sizes match so only the mtime decides.
+			older := fs.WithTimestamps(now.Add(-30*time.Minute), now.Add(-30*time.Minute))
+			newer := fs.WithTimestamps(now.Add(30*time.Minute), now.Add(30*time.Minute))
+
+			workdir := fs.NewDir(t, "somedir",
+				fs.WithFile("older.txt", "S: older", older),
+				fs.WithFile("newer.txt", "S: newer", newer),
+			)
+			defer workdir.Remove()
+
+			putFile(t, s3client, bucket, "older.txt", "D: older")
+			putFile(t, s3client, bucket, "newer.txt", "D: newer")
+
+			src := fmt.Sprintf("%v/", workdir.Path())
+			src = filepath.ToSlash(src)
+			dst := fmt.Sprintf("s3://%v/", bucket)
+
+			cmd := s5cmd("--log", "debug", "sync", src, dst)
+			result := icmd.RunCmd(cmd, withEnv("TZ", zone))
+
+			result.Assert(t, icmd.Success)
+
+			assertLines(t, result.Stdout(), map[int]compareFunc{
+				0: equals(`DEBUG "sync %volder.txt %volder.txt": object is newer or same age and object size matches`, src, dst),
+				1: equals(`cp %vnewer.txt %vnewer.txt`, src, dst),
+			}, sortInput(true))
+
+			assert.Assert(t, ensureS3Object(s3client, bucket, "older.txt", "D: older"))
+			assert.Assert(t, ensureS3Object(s3client, bucket, "newer.txt", "S: newer"))
+		})
+	}
+}
+
 // sync s3://bucket/* folder/ (same objects, source older, destination newer)
 func TestSyncS3BucketToLocalFolderSameObjectsSourceOlder(t *testing.T) {
 	t.Parallel()

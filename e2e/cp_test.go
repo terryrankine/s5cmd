@@ -2907,6 +2907,70 @@ func TestCopyS3ToLocalWithSameFilenameDontOverrideIfS3ObjectIsOlder(t *testing.T
 	assert.Assert(t, fs.Equal(workdir.Path(), expected))
 }
 
+// cp -u file s3://bucket/file with s5cmd running in a non-UTC zone.
+//
+// A local mtime carries the machine's zone, an S3 LastModified is UTC. The
+// comparison must be by instant, not by wall clock, or a file that is a few
+// minutes older than its S3 copy looks hours newer (upstream #845: a server
+// in Copenhagen kept re-uploading unchanged files to a bucket in London).
+//
+// Go reads TZ once at process start, so the zone is forced on the s5cmd
+// binary through its environment. Windows ignores TZ and uses the machine's
+// zone; the Linux CI run covers the listed zones.
+func TestCopyLocalToS3IfSourceNewerComparesInstantsAcrossTimezones(t *testing.T) {
+	t.Parallel()
+
+	// Zones on both sides of UTC catch an offset applied in either direction.
+	zones := []string{"Australia/Perth", "America/New_York", "Europe/Copenhagen"}
+	for _, zone := range zones {
+		t.Run(zone, func(t *testing.T) {
+			t.Parallel()
+
+			now := time.Now()
+			timeSource := newFixedTimeSource(now)
+			s3client, s5cmd := setup(t, withTimeSource(timeSource))
+
+			bucket := s3BucketFromTestName(t)
+			createBucket(t, s3client, bucket)
+
+			// both S3 objects are stamped `now`
+			putFile(t, s3client, bucket, "older.txt", "remote older")
+			putFile(t, s3client, bucket, "newer.txt", "remote newer")
+
+			// 30 minutes either side of the S3 stamp: less than any zone's
+			// offset, so a wall-clock comparison would flip both outcomes.
+			older := fs.WithTimestamps(now.Add(-30*time.Minute), now.Add(-30*time.Minute))
+			newer := fs.WithTimestamps(now.Add(30*time.Minute), now.Add(30*time.Minute))
+			workdir := fs.NewDir(t, t.Name(),
+				fs.WithFile("older.txt", "local older", older),
+				fs.WithFile("newer.txt", "local newer", newer),
+			)
+			defer workdir.Remove()
+
+			cmd := s5cmd("--log=debug", "cp", "-u", "older.txt", "s3://"+bucket+"/older.txt")
+			result := icmd.RunCmd(cmd, withWorkingDir(workdir), withEnv("TZ", zone))
+
+			result.Assert(t, icmd.Success)
+
+			assertLines(t, result.Stdout(), map[int]compareFunc{
+				0: equals(`DEBUG "cp older.txt s3://%v/older.txt": object is newer or same age`, bucket),
+			})
+
+			cmd = s5cmd("--log=debug", "cp", "-u", "newer.txt", "s3://"+bucket+"/newer.txt")
+			result = icmd.RunCmd(cmd, withWorkingDir(workdir), withEnv("TZ", zone))
+
+			result.Assert(t, icmd.Success)
+
+			assertLines(t, result.Stdout(), map[int]compareFunc{
+				0: equals(`cp newer.txt s3://%v/newer.txt`, bucket),
+			})
+
+			assert.Assert(t, ensureS3Object(s3client, bucket, "older.txt", "remote older"))
+			assert.Assert(t, ensureS3Object(s3client, bucket, "newer.txt", "local newer"))
+		})
+	}
+}
+
 // cp -u -s s3://bucket/prefix/* dir/
 func TestCopyS3ToLocal_Issue70(t *testing.T) {
 	t.Parallel()
