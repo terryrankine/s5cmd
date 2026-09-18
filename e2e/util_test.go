@@ -436,7 +436,14 @@ func createBucket(t *testing.T, client *s3.S3, bucket string) {
 
 	_, err := client.CreateBucket(input)
 	if err != nil {
-		t.Fatal(err)
+		// The SDK retries a slow CreateBucket; the retry then gets 409 for
+		// the bucket the first attempt already created. Bucket names carry
+		// a random suffix, so "already exists" here means "ours".
+		var aerr awserr.Error
+		if !errors.As(err, &aerr) ||
+			(aerr.Code() != s3.ErrCodeBucketAlreadyOwnedByYou && aerr.Code() != s3.ErrCodeBucketAlreadyExists) {
+			t.Fatal(err)
+		}
 	}
 
 	if !isEndpointFromEnv() {

@@ -48,3 +48,5 @@ require (
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
 	gopkg.in/mgo.v2 v2.0.0-20180705113604-9856a29383ce // indirect
 )
+
+replace github.com/igungor/gofakes3 => github.com/terryrankine/gofakes3 v0.0.19-0.20260917201636-2dee9d3285ae
