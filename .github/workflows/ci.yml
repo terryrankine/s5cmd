@@ -10,6 +10,7 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         go-version:
           - 1.27.x  # current
@@ -31,6 +32,7 @@ jobs:
 
   test:
     strategy:
+      fail-fast: false
       matrix:
         go-version:
           - 1.27.x  # current
@@ -55,6 +57,8 @@ jobs:
     - name: Start MinIO
       if: matrix.os == 'ubuntu'
       run: |
+        # registries hiccup; a failed pull must not fail the job
+        for _ in 1 2 3; do docker pull -q quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z && break; sleep 10; done
         docker run -d --name minio -p 45677:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
         for _ in $(seq 1 30); do
           curl -sf http://localhost:45677/minio/health/live && exit 0
@@ -68,6 +72,7 @@ jobs:
         S5CMD_TEST_ENDPOINT_URL: ${{ (matrix.os == 'ubuntu') && 'http://localhost:45677' || '' }}
   qa:
     strategy:
+      fail-fast: false
       matrix:
         go-version:
           # Lint on current Go only. staticcheck (tools/go.mod) is built and
