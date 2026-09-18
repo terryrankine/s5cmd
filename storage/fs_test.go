@@ -229,3 +229,142 @@ func TestFilesystemMultiDelete(t *testing.T) {
 		t.Errorf("expected all files to be removed, %d left", len(entries))
 	}
 }
+
+// The path up to the first wildcard is literal, as it is for S3: a directory
+// named "data[2024]" is not a character class. From the wildcard on, the
+// filepath.Glob syntax applies.
+func TestFilesystemGlobLiteralPrefix(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	files := []string{
+		"data[2024]/a.txt",
+		"data[2024]/b.log",
+		"data[2024]/sub/c.txt",
+		"data2/a.txt",
+		"plain/x[1].txt",
+		"plain/x1.txt",
+	}
+	for _, name := range files {
+		path := filepath.Join(tmpDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	testcases := []struct {
+		pattern string
+		want    []string
+	}{
+		{
+			// a glob would read [2024] as "one of 2, 0, 4" and match "data2"
+			pattern: "data[2024]/*",
+			want:    []string{"data[2024]/a.txt", "data[2024]/b.log", "data[2024]/sub"},
+		},
+		{
+			pattern: "data[2024]/*.txt",
+			want:    []string{"data[2024]/a.txt"},
+		},
+		{
+			pattern: "data[2024]/*/*.txt",
+			want:    []string{"data[2024]/sub/c.txt"},
+		},
+		{
+			pattern: "data[2024]/?.txt",
+			want:    []string{"data[2024]/a.txt"},
+		},
+		{
+			// only "*" and "?" are wildcards, but from the first one on the
+			// glob syntax applies, so this [1] still is a character class.
+			pattern: "plain/x[1]*.txt",
+			want:    []string{"plain/x1.txt"},
+		},
+		{
+			pattern: "*/a.txt",
+			want:    []string{"data2/a.txt", "data[2024]/a.txt"},
+		},
+		{
+			pattern: "data[2024]/missing*",
+			want:    nil,
+		},
+		{
+			pattern: "missing[dir]/*",
+			want:    nil,
+		},
+	}
+
+	for _, tc := range testcases {
+		tc := tc
+		t.Run(tc.pattern, func(t *testing.T) {
+			t.Parallel()
+
+			u, err := url.New(filepath.Join(tmpDir, tc.pattern))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !u.IsWildcard() {
+				t.Fatalf("%q is not a wildcard url", tc.pattern)
+			}
+
+			got, err := glob(u)
+			if err != nil {
+				t.Fatalf("glob failed: %v", err)
+			}
+
+			var want []string
+			for _, name := range tc.want {
+				want = append(want, filepath.Join(tmpDir, name))
+			}
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Errorf("glob(%q)\n got: %v\nwant: %v", tc.pattern, got, want)
+			}
+		})
+	}
+}
+
+// A relative pattern is matched under the working directory, and the results
+// keep the form of the pattern.
+func TestFilesystemGlobRelative(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, "dir[1]"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "dir[1]", "f.txt"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "g.txt"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// chdir is process-wide, so this test must not run in parallel.
+	t.Chdir(tmpDir)
+
+	testcases := []struct {
+		pattern string
+		want    []string
+	}{
+		{pattern: "*.txt", want: []string{"g.txt"}},
+		{pattern: "./*.txt", want: []string{"g.txt"}},
+		{pattern: "dir[1]/*", want: []string{filepath.Join("dir[1]", "f.txt")}},
+		{pattern: "./dir[1]/*", want: []string{filepath.Join("dir[1]", "f.txt")}},
+		{pattern: "*/f.txt", want: []string{filepath.Join("dir[1]", "f.txt")}},
+	}
+
+	for _, tc := range testcases {
+		u, err := url.New(tc.pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := glob(u)
+		if err != nil {
+			t.Fatalf("glob(%q) failed: %v", tc.pattern, err)
+		}
+		if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+			t.Errorf("glob(%q)\n got: %v\nwant: %v", tc.pattern, got, tc.want)
+		}
+	}
+}

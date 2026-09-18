@@ -2982,6 +2982,293 @@ func TestSyncS3BucketThatDoesNotExistToLocal(t *testing.T) {
 	})
 }
 
+// sync --exit-on-error s3://bucket/* dest/  (dest exists and is empty)
+//
+// Upstream #810: the destination is listed as "dest/*" to find what is
+// already there. An empty directory matches nothing, which is not an error:
+// it only means everything must be copied.
+func TestSyncS3ObjectsToEmptyLocalDirectoryWithExitOnErrorFlag(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	s3Content := map[string]string{
+		"testfile.txt":   "S: this is a test file",
+		"a/nested/b.txt": "S: nested file",
+		"readme.md":      "S: this is a readme file",
+	}
+	for filename, content := range s3Content {
+		putFile(t, s3client, bucket, filename, content)
+	}
+
+	workdir := fs.NewDir(t, "somedir", fs.WithDir("dest"))
+	defer workdir.Remove()
+
+	src := fmt.Sprintf("s3://%v/*", bucket)
+
+	cmd := s5cmd("sync", "--exit-on-error", src, "dest/")
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp s3://%v/a/nested/b.txt dest/a/nested/b.txt`, bucket),
+		1: equals(`cp s3://%v/readme.md dest/readme.md`, bucket),
+		2: equals(`cp s3://%v/testfile.txt dest/testfile.txt`, bucket),
+	}, sortInput(true))
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	expected := fs.Expected(t,
+		fs.WithDir("dest",
+			fs.WithDir("a",
+				fs.WithDir("nested",
+					fs.WithFile("b.txt", "S: nested file"),
+				),
+			),
+			fs.WithFile("readme.md", "S: this is a readme file"),
+			fs.WithFile("testfile.txt", "S: this is a test file"),
+		),
+	)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+}
+
+// sync --exit-on-error s3://bucket/* newdir/  (dest does not exist yet)
+func TestSyncS3ObjectsToMissingLocalDirectoryWithExitOnErrorFlag(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	putFile(t, s3client, bucket, "testfile.txt", "S: this is a test file")
+	putFile(t, s3client, bucket, "a/b.txt", "S: nested file")
+
+	workdir := fs.NewDir(t, "somedir")
+	defer workdir.Remove()
+
+	src := fmt.Sprintf("s3://%v/*", bucket)
+
+	cmd := s5cmd("sync", "--exit-on-error", src, "newdir/")
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp s3://%v/a/b.txt newdir/a/b.txt`, bucket),
+		1: equals(`cp s3://%v/testfile.txt newdir/testfile.txt`, bucket),
+	}, sortInput(true))
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	expected := fs.Expected(t,
+		fs.WithDir("newdir",
+			fs.WithDir("a",
+				fs.WithFile("b.txt", "S: nested file"),
+			),
+			fs.WithFile("testfile.txt", "S: this is a test file"),
+		),
+	)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+}
+
+// sync s3://bucket/* "data[2024]/"  (dest directory name contains glob characters)
+//
+// The destination is a path, never a pattern. "data[2024]/*" read as a glob
+// matches nothing (it wants a single character out of 2, 0 or 4), so the
+// files already in the directory were invisible and copied again on every
+// run. They must be seen, and only the new object copied.
+func TestSyncS3ObjectsToLocalDirectoryWithGlobCharactersInName(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const dir = "data[2024]"
+
+	// the destination copy is newer than the source, so it must be kept.
+	now := time.Now()
+	timestamp := fs.WithTimestamps(
+		now.Add(time.Minute), // access time
+		now.Add(time.Minute), // mod time
+	)
+
+	putFile(t, s3client, bucket, "testfile.txt", "S: this is a test file")
+	putFile(t, s3client, bucket, "readme.md", "S: this is a readme file")
+
+	workdir := fs.NewDir(t, "somedir",
+		fs.WithDir(dir,
+			fs.WithFile("testfile.txt", "D: this is a test file", timestamp),
+		),
+	)
+	defer workdir.Remove()
+
+	src := fmt.Sprintf("s3://%v/*", bucket)
+
+	cmd := s5cmd("sync", src, dir+"/")
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp s3://%v/readme.md %v/readme.md`, bucket, dir),
+	})
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	expected := fs.Expected(t,
+		fs.WithDir(dir,
+			fs.WithFile("readme.md", "S: this is a readme file"),
+			fs.WithFile("testfile.txt", "D: this is a test file"),
+		),
+	)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+}
+
+// sync --delete s3://bucket/* "logs[a-z]/"  (dest directory name contains glob characters)
+//
+// With --delete the invisible destination also meant nothing was ever removed.
+func TestSyncS3ObjectsToLocalDirectoryWithGlobCharactersInNameWithDelete(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const dir = "logs[a-z]"
+
+	now := time.Now()
+	timestamp := fs.WithTimestamps(
+		now.Add(time.Minute), // access time
+		now.Add(time.Minute), // mod time
+	)
+
+	putFile(t, s3client, bucket, "testfile.txt", "S: this is a test file")
+
+	workdir := fs.NewDir(t, "somedir",
+		fs.WithDir(dir,
+			fs.WithFile("testfile.txt", "D: this is a test file", timestamp),
+			fs.WithFile("stale.txt", "D: only in destination", timestamp),
+		),
+	)
+	defer workdir.Remove()
+
+	src := fmt.Sprintf("s3://%v/*", bucket)
+
+	cmd := s5cmd("sync", "--delete", src, dir+"/")
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`rm %v/stale.txt`, dir),
+	})
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	expected := fs.Expected(t,
+		fs.WithDir(dir,
+			fs.WithFile("testfile.txt", "D: this is a test file"),
+		),
+	)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+}
+
+// sync s3://bucket/* C:\somedir\dest[1]\  (native destination path)
+//
+// The destination is given as the OS writes it: on Windows with backslashes,
+// which s5cmd turns into slashes.
+func TestSyncS3ObjectsToNativeLocalDirectoryPath(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const dir = "dest[1]"
+
+	now := time.Now()
+	timestamp := fs.WithTimestamps(
+		now.Add(time.Minute), // access time
+		now.Add(time.Minute), // mod time
+	)
+
+	putFile(t, s3client, bucket, "testfile.txt", "S: this is a test file")
+	putFile(t, s3client, bucket, "sub/readme.md", "S: this is a readme file")
+
+	workdir := fs.NewDir(t, "somedir",
+		fs.WithDir(dir,
+			fs.WithFile("testfile.txt", "D: this is a test file", timestamp),
+		),
+	)
+	defer workdir.Remove()
+
+	src := fmt.Sprintf("s3://%v/*", bucket)
+	dst := workdir.Join(dir) + string(filepath.Separator)
+
+	cmd := s5cmd("sync", src, dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp s3://%v/sub/readme.md %vsub/readme.md`, bucket, filepath.ToSlash(dst)),
+	})
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	expected := fs.Expected(t,
+		fs.WithDir(dir,
+			fs.WithDir("sub",
+				fs.WithFile("readme.md", "S: this is a readme file"),
+			),
+			fs.WithFile("testfile.txt", "D: this is a test file"),
+		),
+	)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+}
+
+// sync "data[2024]/*" s3://bucket/  (source directory name contains glob characters)
+func TestSyncLocalDirectoryWithGlobCharactersInNameToS3(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const dir = "data[2024]"
+
+	workdir := fs.NewDir(t, "somedir",
+		fs.WithDir(dir,
+			fs.WithFile("testfile.txt", "S: this is a test file"),
+			fs.WithDir("sub",
+				fs.WithFile("readme.md", "S: this is a readme file"),
+			),
+		),
+	)
+	defer workdir.Remove()
+
+	dst := fmt.Sprintf("s3://%v/", bucket)
+
+	cmd := s5cmd("sync", dir+"/*", dst)
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp %v/sub/readme.md %vsub/readme.md`, dir, dst),
+		1: equals(`cp %v/testfile.txt %vtestfile.txt`, dir, dst),
+	}, sortInput(true))
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	assert.Assert(t, ensureS3Object(s3client, bucket, "testfile.txt", "S: this is a test file"))
+	assert.Assert(t, ensureS3Object(s3client, bucket, "sub/readme.md", "S: this is a readme file"))
+}
+
 // sync --delete --include "*.md" --include "sub/*" folder/ s3://bucket/prefix/
 func TestSyncLocalToS3BucketWithDeleteAndIncludeFilter(t *testing.T) {
 	t.Parallel()
