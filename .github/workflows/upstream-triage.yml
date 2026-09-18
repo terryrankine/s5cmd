@@ -1,0 +1,48 @@
+name: upstream-triage
+# Quarterly: list upstream issues that docs/issue-tracker.md does not mention
+# yet, so the reconciliation against the current build is done by a person
+# (or a Claude routine) with the list already prepared.
+on:
+  schedule:
+    - cron: '0 7 1 1,4,7,10 *'   # 1 Jan/Apr/Jul/Oct 07:00 UTC
+  workflow_dispatch:
+permissions:
+  issues: write
+  contents: read
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Untracked upstream issues
+        id: diff
+        run: |
+          gh issue list --repo peak/s5cmd --state open --limit 500 --json number,title,createdAt,labels \
+            --jq '.[] | "\(.number)\t\(.createdAt[:10])\t\(.title)"' | sort -n > open.tsv
+          grep -oE 'issues/[0-9]+' docs/issue-tracker.md | grep -oE '[0-9]+' | sort -un > tracked.txt
+          cut -f1 open.tsv | sort -un > open.txt
+          comm -23 open.txt tracked.txt > new.txt
+          comm -13 open.txt tracked.txt > closed.txt
+          echo "new=$(wc -l < new.txt)" >> "$GITHUB_OUTPUT"
+          echo "closed=$(wc -l < closed.txt)" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Upstream issues not in docs/issue-tracker.md ($(wc -l < new.txt))"
+            echo
+            echo "| Issue | Opened | Title |"
+            echo "|---|---|---|"
+            while read -r n; do awk -F'\t' -v n="$n" '$1==n {printf "| [#%s](https://github.com/peak/s5cmd/issues/%s) | %s | %s |\n", $1, $1, $2, $3}' open.tsv; done < new.txt
+            echo
+            echo "## Tracked issues now closed upstream ($(wc -l < closed.txt))"
+            echo
+            tr '\n' ' ' < closed.txt | sed 's/\([0-9]\+\)/#\1/g'; echo
+            echo
+            echo "For each new issue: reproduce against the current release (see MAINTAINING.md), then add it to the FIXED / IMPROVED / NOT FIXED tables in \`docs/issue-tracker.md\`. Closed ones can be dropped from the tables."
+          } > body.md
+          cat body.md
+      - name: Open triage issue
+        if: steps.diff.outputs.new != '0' || steps.diff.outputs.closed != '0'
+        run: |
+          title="upstream triage: $(date -u +%Y-%m) — ${{ steps.diff.outputs.new }} new, ${{ steps.diff.outputs.closed }} closed"
+          gh issue create --title "$title" --label needs-human --label automation --body-file body.md
