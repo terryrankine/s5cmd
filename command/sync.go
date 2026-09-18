@@ -108,7 +108,11 @@ func NewSyncCommand() *cli.Command {
 		Action: func(c *cli.Context) (err error) {
 			defer stat.Collect(c.Command.FullName(), &err)()
 
-			return NewSync(c).Run(c)
+			s, err := NewSync(c)
+			if err != nil {
+				return err
+			}
+			return s.Run(c)
 		},
 	}
 
@@ -150,19 +154,33 @@ type Sync struct {
 }
 
 // NewSync creates Sync from cli.Context
-func NewSync(c *cli.Context) Sync {
+func NewSync(c *cli.Context) (Sync, error) {
+	fullCommand := commandFromContext(c)
+
+	exclude, err := patternsFromContext(c, "exclude")
+	if err != nil {
+		printError(fullCommand, c.Command.Name, err)
+		return Sync{}, err
+	}
+
+	include, err := patternsFromContext(c, "include")
+	if err != nil {
+		printError(fullCommand, c.Command.Name, err)
+		return Sync{}, err
+	}
+
 	return Sync{
 		src:         c.Args().Get(0),
 		dst:         c.Args().Get(1),
 		op:          c.Command.Name,
-		fullCommand: commandFromContext(c),
+		fullCommand: fullCommand,
 
 		// flags
 		delete:      c.Bool("delete"),
 		sizeOnly:    c.Bool("size-only"),
 		exitOnError: c.Bool("exit-on-error"),
-		exclude:     c.StringSlice("exclude"),
-		include:     c.StringSlice("include"),
+		exclude:     exclude,
+		include:     include,
 
 		// flags
 		followSymlinks: !c.Bool("no-follow-symlinks"),
@@ -172,7 +190,7 @@ func NewSync(c *cli.Context) Sync {
 		srcRegion:   c.String("source-region"),
 		dstRegion:   c.String("destination-region"),
 		storageOpts: NewStorageOpts(c),
-	}
+	}, nil
 }
 
 // Run compares files, plans necessary s5cmd commands to execute
@@ -471,8 +489,16 @@ func (s Sync) planRun(
 	// Always use raw mode since sync command generates commands
 	// from raw S3 objects. Otherwise, generated copy command will
 	// try to expand given source.
+	//
+	// The generated cp command filters the source objects, so pass it the
+	// merged --exclude/--include patterns and not the --exclude-from/
+	// --include-from files they were read from.
 	defaultFlags := map[string]interface{}{
-		"raw": true,
+		"raw":          true,
+		"exclude":      s.exclude,
+		"include":      s.include,
+		"exclude-from": nil,
+		"include-from": nil,
 	}
 
 	// it should wait until both of the child goroutines for onlySource and common channels
@@ -575,9 +601,11 @@ func (s Sync) planRun(
 			// the destination prefix. Omit them from the generated rm command,
 			// which would match them against the full object key instead.
 			rmFlags := map[string]interface{}{
-				"raw":     true,
-				"exclude": nil,
-				"include": nil,
+				"raw":          true,
+				"exclude":      nil,
+				"include":      nil,
+				"exclude-from": nil,
+				"include-from": nil,
 			}
 
 			command, err := generateCommand(c, "rm", rmFlags, dstURLs...)

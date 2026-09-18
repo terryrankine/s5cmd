@@ -340,6 +340,19 @@ If you wish, you can use multiple flags, like below. It will download objects th
 Using a combination of `--include` and `--exclude` also possible. The command below will only sync objects that end with `.log` or `.txt` but exclude those that start with `access_`. For example, `request.log`, and `license.txt` will be included, while `access_log.txt`, and `readme.md` are excluded.
 
     s5cmd sync --include "*.log" --exclude "access_*" --include "*.txt" 's3://bucket/logs/*' .
+
+Patterns can also be read from a file with `--exclude-from` and `--include-from`. Each file holds one pattern per line; blank lines and lines starting with `#` are ignored, and surrounding whitespace is trimmed. The patterns are appended to the `--exclude` and `--include` lists and follow the same rules: they are matched relative to the source prefix, and `--exclude` still has precedence over `--include`. Both flags can be repeated and mixed with the inline flags. A missing or unreadable file is an error, and nothing is listed or transferred.
+
+With a `patterns.txt` like
+
+    # temporary and build files
+    *.tmp
+    build/*
+
+the command below will copy everything except temporary files, the `build` directory and `.bak` files.
+
+    s5cmd cp --exclude-from patterns.txt --exclude "*.bak" 's3://bucket/logs/2020/*' .
+
 #### Select JSON object content using SQL
 
 `s5cmd` supports the `SelectObjectContent` S3 operation, and will run your

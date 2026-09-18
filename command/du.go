@@ -70,6 +70,10 @@ func NewSizeCommand() *cli.Command {
 				Name:  "exclude",
 				Usage: "exclude objects with given pattern",
 			},
+			&cli.StringSliceFlag{
+				Name:  "exclude-from",
+				Usage: "exclude objects with the patterns read from given file, one per line",
+			},
 			&cli.BoolFlag{
 				Name:  "all-versions",
 				Usage: "list all versions of object(s)",
@@ -99,6 +103,12 @@ func NewSizeCommand() *cli.Command {
 				return err
 			}
 
+			exclude, err := patternsFromContext(c, "exclude")
+			if err != nil {
+				printError(fullCommand, c.Command.Name, err)
+				return err
+			}
+
 			return Size{
 				src:         srcurl,
 				op:          c.Command.Name,
@@ -106,7 +116,7 @@ func NewSizeCommand() *cli.Command {
 				// flags
 				groupByClass: c.Bool("group"),
 				humanize:     c.Bool("humanize"),
-				exclude:      c.StringSlice("exclude"),
+				exclude:      exclude,
 
 				storageOpts: NewStorageOpts(c),
 			}.Run(c.Context)

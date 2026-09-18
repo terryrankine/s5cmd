@@ -1453,3 +1453,57 @@ func TestRemoveS3ObjectsWithIncludeExcludeFilter2(t *testing.T) {
 		assert.Assert(t, ensureS3Object(s3client, bucket, f, fileContent))
 	}
 }
+
+// rm --include "*.py" --include-from patterns.txt s3://bucket/*
+func TestRemoveS3ObjectsWithIncludeFromFile(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const (
+		includePattern     = "*.py"
+		patternFile        = "patterns.txt"
+		patternFileContent = "# patterns from file are appended to --include\n\n  *.go\n"
+		fileContent        = "content"
+	)
+
+	files := [...]string{
+		"file1.py",
+		"file2.go",
+		"file.txt",
+		"data.txt",
+		"src/app.py",
+	}
+	filesKept := [...]string{
+		"file.txt",
+		"data.txt",
+	}
+
+	for _, filename := range files {
+		putFile(t, s3client, bucket, filename, fileContent)
+	}
+
+	workdir := fs.NewDir(t, t.Name(), fs.WithFile(patternFile, patternFileContent))
+	defer workdir.Remove()
+
+	srcpath := fmt.Sprintf("s3://%s", bucket)
+
+	cmd := s5cmd("rm", "--include", includePattern, "--include-from", workdir.Join(patternFile), srcpath+"/*")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals("rm %v/%s", srcpath, files[0]),
+		1: equals("rm %v/%s", srcpath, files[1]),
+		2: equals("rm %v/%s", srcpath, files[4]),
+	}, sortInput(true))
+
+	// assert s3
+	for _, f := range filesKept {
+		assert.Assert(t, ensureS3Object(s3client, bucket, f, fileContent))
+	}
+}

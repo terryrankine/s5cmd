@@ -54,6 +54,9 @@ Examples:
 
 	10. Delete all versions of all objects in the bucket
 		 > s5cmd {{.HelpName}} --all-versions "s3://bucket/*"
+
+	11. Delete all matching objects but only the ones matching the patterns listed in a file, one per line
+		 > s5cmd {{.HelpName}} --include-from patterns.txt "s3://bucketname/prefix/*"
 `
 
 func NewDeleteCommand() *cli.Command {
@@ -71,8 +74,16 @@ func NewDeleteCommand() *cli.Command {
 				Usage: "exclude objects with given pattern",
 			},
 			&cli.StringSliceFlag{
+				Name:  "exclude-from",
+				Usage: "exclude objects with the patterns read from given file, one per line",
+			},
+			&cli.StringSliceFlag{
 				Name:  "include",
 				Usage: "include objects with given pattern",
+			},
+			&cli.StringSliceFlag{
+				Name:  "include-from",
+				Usage: "include objects with the patterns read from given file, one per line",
 			},
 			&cli.BoolFlag{
 				Name:  "all-versions",
@@ -102,13 +113,25 @@ func NewDeleteCommand() *cli.Command {
 				return err
 			}
 
-			excludePatterns, err := createRegexFromWildcard(c.StringSlice("exclude"))
+			exclude, err := patternsFromContext(c, "exclude")
 			if err != nil {
 				printError(fullCommand, c.Command.Name, err)
 				return err
 			}
 
-			includePatterns, err := createRegexFromWildcard(c.StringSlice("include"))
+			include, err := patternsFromContext(c, "include")
+			if err != nil {
+				printError(fullCommand, c.Command.Name, err)
+				return err
+			}
+
+			excludePatterns, err := createRegexFromWildcard(exclude)
+			if err != nil {
+				printError(fullCommand, c.Command.Name, err)
+				return err
+			}
+
+			includePatterns, err := createRegexFromWildcard(include)
 			if err != nil {
 				printError(fullCommand, c.Command.Name, err)
 				return err
@@ -120,8 +143,8 @@ func NewDeleteCommand() *cli.Command {
 				fullCommand: fullCommand,
 
 				// flags
-				exclude: c.StringSlice("exclude"),
-				include: c.StringSlice("include"),
+				exclude: exclude,
+				include: include,
 
 				// patterns
 				excludePatterns: excludePatterns,

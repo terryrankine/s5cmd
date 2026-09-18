@@ -2507,6 +2507,79 @@ func TestSyncLocalToS3BucketWithDeleteAndExcludeFilter(t *testing.T) {
 	}
 }
 
+// sync --delete --exclude-from patterns.txt folder/ s3://bucket/prefix/
+func TestSyncLocalToS3BucketWithDeleteAndExcludeFromFile(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	folderLayout := []fs.PathOp{
+		fs.WithFile("readme.md", "S: this is a readme file"),
+		fs.WithFile("notes.tmp", "S: this is a temp file"),
+	}
+
+	workdir := fs.NewDir(t, "somedir", folderLayout...)
+	defer workdir.Remove()
+
+	s3Content := map[string]string{
+		"prefix/sub/keep.txt": "D: this is a text file",
+		"prefix/old.log":      "D: this is a log file",
+	}
+
+	for filename, content := range s3Content {
+		putFile(t, s3client, bucket, filename, content)
+	}
+
+	// patterns are relative to the source and destination prefixes, like --exclude.
+	const patternFileContent = "# skip temp files and the sub folder\n*.tmp\n\nsub/*\n"
+
+	patterndir := fs.NewDir(t, "patterns", fs.WithFile("patterns.txt", patternFileContent))
+	defer patterndir.Remove()
+
+	src := fmt.Sprintf("%v/", workdir.Path())
+	src = filepath.ToSlash(src)
+	dst := fmt.Sprintf("s3://%v/prefix/", bucket)
+
+	cmd := s5cmd("sync", "--delete", "--exclude-from", patterndir.Join("patterns.txt"), src, dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp %vreadme.md %vreadme.md`, src, dst),
+		1: equals(`rm %vold.log`, dst),
+	}, sortInput(true))
+
+	// assert local filesystem
+	expected := fs.Expected(t, folderLayout...)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+
+	expectedS3Content := map[string]string{
+		"prefix/readme.md": "S: this is a readme file",
+		// excluded object exists only in destination and must not be deleted.
+		"prefix/sub/keep.txt": "D: this is a text file",
+	}
+
+	nonExpectedS3Content := map[string]string{
+		"prefix/old.log":   "D: this is a log file",
+		"prefix/notes.tmp": "S: this is a temp file",
+	}
+
+	// assert objects should be in S3
+	for key, content := range expectedS3Content {
+		assert.Assert(t, ensureS3Object(s3client, bucket, key, content))
+	}
+
+	// assert objects should not be in S3.
+	for key, content := range nonExpectedS3Content {
+		err := ensureS3Object(s3client, bucket, key, content)
+		assertError(t, err, errS3NoSuchKey)
+	}
+}
+
 // sync --delete --exclude "sub/*" s3://bucket/* folder/
 func TestSyncS3BucketToLocalWithDeleteAndExcludeFilter(t *testing.T) {
 	t.Parallel()

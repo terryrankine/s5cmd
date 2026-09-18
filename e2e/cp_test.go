@@ -4602,6 +4602,92 @@ func TestCopyS3ObjectsWithIncludeExcludeFilter2(t *testing.T) {
 	assert.Assert(t, fs.Equal(cmd.Dir, expected))
 }
 
+// cp --exclude-from patterns.txt s3://bucket/* .
+func TestCopyS3ObjectsWithExcludeFromFile(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const (
+		patternFile = "patterns.txt"
+		// blank lines, comments and surrounding whitespace are ignored.
+		patternFileContent = "# excluded patterns\n\n  *.py  \n\t\nfile*\n"
+		fileContent        = "content"
+	)
+
+	files := [...]string{
+		"file1.txt",
+		"file2.txt",
+		"file.py",
+		"a.py",
+		"src/file.py",
+		"readme.md",
+	}
+
+	for _, filename := range files {
+		putFile(t, s3client, bucket, filename, fileContent)
+	}
+
+	workdir := fs.NewDir(t, t.Name(), fs.WithFile(patternFile, patternFileContent))
+	defer workdir.Remove()
+
+	srcpath := fmt.Sprintf("s3://%s", bucket)
+
+	cmd := s5cmd("cp", "--exclude-from", workdir.Join(patternFile), srcpath+"/*", ".")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals("cp %v/readme.md %s", srcpath, files[5]),
+	})
+
+	// assert s3
+	for _, f := range files {
+		assert.Assert(t, ensureS3Object(s3client, bucket, f, fileContent))
+	}
+
+	// assert local filesystem
+	expected := fs.Expected(t, fs.WithFile("readme.md", fileContent))
+	assert.Assert(t, fs.Equal(cmd.Dir, expected))
+}
+
+// cp --exclude-from missing.txt s3://bucket/* .
+func TestCopyS3ObjectsWithMissingExcludeFromFile(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const fileContent = "content"
+
+	putFile(t, s3client, bucket, "file1.txt", fileContent)
+
+	workdir := fs.NewDir(t, t.Name())
+	defer workdir.Remove()
+
+	patternFile := filepath.ToSlash(workdir.Join("missing.txt"))
+	srcpath := fmt.Sprintf("s3://%s", bucket)
+
+	cmd := s5cmd("cp", "--exclude-from", patternFile, srcpath+"/*", ".")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: contains(`ERROR "cp --exclude-from=%v %v/* .": --exclude-from: open %v:`, patternFile, srcpath, patternFile),
+	})
+
+	// nothing should be copied
+	expected := fs.Expected(t)
+	assert.Assert(t, fs.Equal(cmd.Dir, expected))
+}
+
 // cp --content-type "video/mp4" file s3://bucket/
 func TestCopySingleLocalFileToS3WithContentType(t *testing.T) {
 	t.Parallel()

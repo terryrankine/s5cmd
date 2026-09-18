@@ -1,6 +1,9 @@
 # Changelog
 ## Unreleased
 
+#### Features
+- Added `--exclude-from` and `--include-from` to `cp`, `mv`, `rm` and `sync`, and `--exclude-from` to `ls`, `du` and `select`: read wildcard patterns from a file, one per line; blank lines and `#` comments are ignored. (upstream [#868](https://github.com/peak/s5cmd/issues/868))
+
 #### Bugfixes
 - Fixed `--dry-run` downloads closing stdin: the placeholder file handle wrapped fd 0, so `s5cmd --dry-run run < commands` hung after the first download. Regression in v2.4.0. (upstream [#879](https://github.com/peak/s5cmd/pull/879))
 - Fixed `sync --delete` with `--exclude`/`--include`: filters were re-applied by the generated `rm --raw` against full keys, so `folder/*` never matched and `--include` deleted nothing. ([#815](https://github.com/peak/s5cmd/issues/815), upstream [#883](https://github.com/peak/s5cmd/pull/883))

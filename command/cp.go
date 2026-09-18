@@ -118,6 +118,9 @@ Examples:
 
 	24. Pass arbitrary metadata to the object during upload or copy
 		 > s5cmd {{.HelpName}} --metadata "camera=Nixon D750" --metadata "imageSize=6032x4032" flowers.png s3://bucket/prefix/flowers.png
+
+	25. Copy all files to S3 bucket but exclude the ones matching the patterns listed in a file, one per line
+		 > s5cmd {{.HelpName}} --exclude-from patterns.txt dir/ s3://bucket
 `
 
 func NewSharedFlags() []cli.Flag {
@@ -198,8 +201,16 @@ func NewSharedFlags() []cli.Flag {
 			Usage: "exclude objects with given pattern",
 		},
 		&cli.StringSliceFlag{
+			Name:  "exclude-from",
+			Usage: "exclude objects with the patterns read from given file, one per line",
+		},
+		&cli.StringSliceFlag{
 			Name:  "include",
 			Usage: "include objects with given pattern",
+		},
+		&cli.StringSliceFlag{
+			Name:  "include-from",
+			Usage: "include objects with the patterns read from given file, one per line",
 		},
 		&cli.BoolFlag{
 			Name:  "raw",
@@ -378,6 +389,18 @@ func NewCopy(c *cli.Context, deleteSource bool) (*Copy, error) {
 		return nil, err
 	}
 
+	exclude, err := patternsFromContext(c, "exclude")
+	if err != nil {
+		printError(fullCommand, c.Command.Name, err)
+		return nil, err
+	}
+
+	include, err := patternsFromContext(c, "include")
+	if err != nil {
+		printError(fullCommand, c.Command.Name, err)
+		return nil, err
+	}
+
 	return &Copy{
 		src:          src,
 		dst:          dst,
@@ -398,8 +421,8 @@ func NewCopy(c *cli.Context, deleteSource bool) (*Copy, error) {
 		acl:                   c.String("acl"),
 		forceGlacierTransfer:  c.Bool("force-glacier-transfer"),
 		ignoreGlacierWarnings: c.Bool("ignore-glacier-warnings"),
-		exclude:               c.StringSlice("exclude"),
-		include:               c.StringSlice("include"),
+		exclude:               exclude,
+		include:               include,
 		cacheControl:          c.String("cache-control"),
 		expires:               c.String("expires"),
 		contentType:           c.String("content-type"),
