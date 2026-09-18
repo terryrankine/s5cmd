@@ -413,6 +413,47 @@ func TestCopyS3ObjectsToLocalWithPathTraversalKey(t *testing.T) {
 	assert.Assert(t, fs.Equal(workdir.Path(), expected))
 }
 
+// cp s3://bucket/* dir/  (object key names the directory itself: "p/.")
+//
+// Such a key must be rejected like a traversal: otherwise the destination
+// directory is treated as the file, the body is written to a temp file
+// beside it, and the final rename fails.
+func TestCopyS3ObjectsToLocalWithDotKey(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	putFile(t, s3client, bucket, "p/ok.txt", "ok")
+	putFile(t, s3client, bucket, "p/.", "pwned")
+	assert.Assert(t, ensureS3Object(s3client, bucket, "p/.", "pwned"))
+
+	workdir := fs.NewDir(t, "somedir", fs.WithDir("dest"))
+	defer workdir.Remove()
+
+	cmd := s5cmd("cp", "s3://"+bucket+"/p/*", "dest/")
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp s3://%v/p/ok.txt dest/ok.txt`, bucket),
+	})
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: contains(`escapes destination`),
+	})
+
+	// nothing beside dest/, nothing but ok.txt inside it.
+	expected := fs.Expected(t,
+		fs.WithDir("dest",
+			fs.WithFile("ok.txt", "ok"),
+		),
+	)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+}
+
 // cp --flatten s3://bucket/*.txt dir/
 func TestCopyMultipleFlatS3ObjectsToLocalWithPartialMatching(t *testing.T) {
 	t.Parallel()
