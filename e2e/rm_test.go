@@ -1453,3 +1453,76 @@ func TestRemoveS3ObjectsWithIncludeExcludeFilter2(t *testing.T) {
 		assert.Assert(t, ensureS3Object(s3client, bucket, f, fileContent))
 	}
 }
+
+// --stat rm s3://bucket/*
+//
+// One stat entry is recorded for every object removed, not one for the
+// command (upstream peak/s5cmd#649).
+func TestRemoveMultipleS3ObjectsWithStat(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	filesToContent := map[string]string{
+		"testfile1.txt":          "this is a test file 1",
+		"readme.md":              "this is a readme file",
+		"filename-with-hypen.gz": "file has hypen in its name",
+		"another_test_file.txt":  "yet another txt file. yatf.",
+	}
+
+	for filename, content := range filesToContent {
+		putFile(t, s3client, bucket, filename, content)
+	}
+
+	cmd := s5cmd("--stat", "rm", "s3://"+bucket+"/*")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	output, stats := splitStatTable(t, result.Stdout())
+
+	assertLines(t, output, map[int]compareFunc{
+		0: equals(`rm s3://%v/another_test_file.txt`, bucket),
+		1: equals(`rm s3://%v/filename-with-hypen.gz`, bucket),
+		2: equals(`rm s3://%v/readme.md`, bucket),
+		3: equals(`rm s3://%v/testfile1.txt`, bucket),
+	}, sortInput(true))
+
+	assert.DeepEqual(t, stats, map[string]string{"rm": "4 0 4"})
+
+	// assert s3 objects
+	for filename, content := range filesToContent {
+		err := ensureS3Object(s3client, bucket, filename, content)
+		assertError(t, err, errS3NoSuchKey)
+	}
+}
+
+// --stat rm nonexistentfile
+//
+// A run that removes nothing records a single error, not an error plus a
+// command entry.
+func TestRemoveNonexistingLocalFileWithStat(t *testing.T) {
+	t.Parallel()
+
+	_, s5cmd := setup(t)
+
+	cmd := s5cmd("--stat", "rm", "nonexistentfile")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: equals(`ERROR "rm nonexistentfile": no object found`),
+	})
+
+	output, stats := splitStatTable(t, result.Stdout())
+
+	assertLines(t, output, map[int]compareFunc{})
+
+	assert.DeepEqual(t, stats, map[string]string{"rm": "1 1 0"})
+}

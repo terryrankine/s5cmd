@@ -1207,3 +1207,28 @@ func indexSlice(slice []string, target string, fn func(str, target string) bool)
 	}
 	return -1
 }
+
+// splitStatTable splits stdout of a command run with --stat into the
+// operation output that precedes the stat table and the table rows, keyed
+// by operation name with "total error success" as the value.
+func splitStatTable(t *testing.T, stdout string) (string, map[string]string) {
+	t.Helper()
+
+	const header = "\nOperation\tTotal\tError\tSuccess\t\n"
+
+	output, table, found := strings.Cut(stdout, header)
+	if !found {
+		t.Fatalf("stat table not found in output:\n%v", stdout)
+	}
+
+	rows := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(table), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 4 {
+			t.Fatalf("unexpected stat table row %q", line)
+		}
+		rows[fields[0]] = strings.Join(fields[1:], " ")
+	}
+
+	return output, rows
+}

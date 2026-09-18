@@ -7,6 +7,7 @@
 - Fixed `--log-file` silently falling back to stdout when the file cannot be opened; the command now fails with the reason.
 - Fixed `--no-clobber`, `--if-size-differ` and `--if-source-newer` sending the destination HEAD to the source region when `--destination-region` differs. ([#839](https://github.com/peak/s5cmd/issues/839), same as upstream [#862](https://github.com/peak/s5cmd/pull/862))
 - Fixed multipart copy (>5 GiB) ignoring `--metadata-directive REPLACE` and dropping the source SSE-KMS key.
+- Fixed `--stat` counting `rm` once per command rather than once per object, so `sync --delete --stat` reported 1 removal when many files were deleted. (upstream [#649](https://github.com/peak/s5cmd/issues/649))
 
 ## v2.4.0 - 18 Mar 2026
 
