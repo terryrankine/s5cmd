@@ -335,6 +335,107 @@ func TestS3ListURL(t *testing.T) {
 	}
 }
 
+// The directory-marker object of the listed prefix ("key/" while listing
+// "key/") is the listing root, not an entry under it: it is left out, but a
+// prefix that holds nothing else still lists as found (empty), not as
+// ErrNoObjectFound. Any other key ending in "/" is a directory entry.
+func TestS3ListPrefixMarker(t *testing.T) {
+	type entry struct {
+		isDir  bool
+		url    string
+		relurl string
+	}
+
+	tests := []struct {
+		name     string
+		url      string
+		output   *s3.ListObjectsV2Output
+		expected []entry
+	}{
+		{
+			name: "marker among entries, listed with delimiter",
+			url:  "s3://bucket/key/",
+			output: &s3.ListObjectsV2Output{
+				CommonPrefixes: []*s3.CommonPrefix{
+					{Prefix: aws.String("key/a/")},
+				},
+				Contents: []*s3.Object{
+					{Key: aws.String("key/")},
+					{Key: aws.String("key/test.txt")},
+				},
+			},
+			expected: []entry{
+				{isDir: true, url: "s3://bucket/key/a/", relurl: "a/"},
+				{isDir: false, url: "s3://bucket/key/test.txt", relurl: "test.txt"},
+			},
+		},
+		{
+			name: "markers among entries, listed with wildcard",
+			url:  "s3://bucket/key/*",
+			output: &s3.ListObjectsV2Output{
+				Contents: []*s3.Object{
+					{Key: aws.String("key/")},
+					{Key: aws.String("key/a/")},
+					{Key: aws.String("key/a/test.txt")},
+				},
+			},
+			expected: []entry{
+				{isDir: true, url: "s3://bucket/key/a/", relurl: "a/"},
+				{isDir: false, url: "s3://bucket/key/a/test.txt", relurl: "a/test.txt"},
+			},
+		},
+		{
+			name: "nothing but the marker",
+			url:  "s3://bucket/key/",
+			output: &s3.ListObjectsV2Output{
+				Contents: []*s3.Object{
+					{Key: aws.String("key/")},
+				},
+			},
+			expected: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			url, err := url.New(tc.url)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			mockAPI := s3.New(unit.Session)
+			mockS3 := &S3{
+				api: mockAPI,
+			}
+
+			mockAPI.Handlers.Send.Clear()
+			mockAPI.Handlers.Unmarshal.Clear()
+			mockAPI.Handlers.UnmarshalMeta.Clear()
+			mockAPI.Handlers.ValidateResponse.Clear()
+			mockAPI.Handlers.Unmarshal.PushBack(func(r *request.Request) {
+				r.Data = tc.output
+			})
+
+			var got []entry
+			for obj := range mockS3.List(context.Background(), url, true) {
+				if obj.Err != nil {
+					t.Errorf("unexpected error: %v", obj.Err)
+					continue
+				}
+				got = append(got, entry{
+					isDir:  obj.Type.IsDir(),
+					url:    obj.URL.Absolute(),
+					relurl: obj.URL.Relative(),
+				})
+			}
+
+			if diff := cmp.Diff(tc.expected, got, cmp.AllowUnexported(entry{})); diff != "" {
+				t.Errorf("(-want +got):\n%v", diff)
+			}
+		})
+	}
+}
+
 func TestS3ListError(t *testing.T) {
 	url, err := url.New("s3://bucket/key")
 	if err != nil {

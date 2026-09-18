@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/igungor/gofakes3"
 	"gotest.tools/v3/icmd"
 )
 
@@ -166,6 +167,65 @@ func TestDiskUsageMissingObject(t *testing.T) {
 
 	assertLines(t, result.Stdout(), map[int]compareFunc{
 		0: suffix(`0 bytes in 0 objects: s3://%v/non-existent-file`, bucket),
+	})
+}
+
+// du s3://bucket/prefix/*  (directory markers "prefix/", "prefix/sub/",
+// "prefix/empty/")
+//
+// Markers are folders, not files: they are neither counted nor sized.
+// See: https://github.com/peak/s5cmd/issues/517
+func TestDiskUsageWildcardWithDirectoryMarkers(t *testing.T) {
+	t.Parallel()
+
+	var backend gofakes3.Backend
+	s3client, s5cmd := setup(t, withBackend(&backend))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	putDirectoryMarker(t, s3client, backend, bucket, "p/")
+	putDirectoryMarker(t, s3client, backend, bucket, "p/sub/")
+	putDirectoryMarker(t, s3client, backend, bucket, "p/empty/")
+	putFile(t, s3client, bucket, "p/a.txt", "A")
+	putFile(t, s3client, bucket, "p/sub/b.txt", "BB")
+
+	cmd := s5cmd("du", "s3://"+bucket+"/p/*")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: suffix(`3 bytes in 2 objects: s3://%v/p/*`, bucket),
+	})
+}
+
+// du s3://bucket/prefix/  (prefix has a directory-marker object "prefix/")
+func TestDiskUsagePrefixWithDirectoryMarker(t *testing.T) {
+	t.Parallel()
+
+	var backend gofakes3.Backend
+	s3client, s5cmd := setup(t, withBackend(&backend))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	putDirectoryMarker(t, s3client, backend, bucket, "p/")
+	putFile(t, s3client, bucket, "p/a.txt", "A")
+	putFile(t, s3client, bucket, "p/sub/b.txt", "BB")
+
+	cmd := s5cmd("du", "s3://"+bucket+"/p/")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	// not recursive without a wildcard: sub/ is a common prefix
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: suffix(`1 bytes in 1 objects: s3://%v/p/`, bucket),
 	})
 }
 

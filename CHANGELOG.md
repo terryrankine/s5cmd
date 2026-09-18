@@ -7,6 +7,9 @@ Minor and major releases are described here. Patch releases (dependency, securit
 #### Features
 - `run --exit-on-error`: stop reading commands after the first one fails and cancel the ones still running. `sync --exit-on-error` now means the same thing for the `cp`/`rm` commands it generates (it had become a no-op in v2.4.1, when listing errors started stopping the sync unconditionally).
 
+#### Bugfixes
+- `ls`: the directory-marker object of the listed prefix (the zero-byte `prefix/` key the console creates for a "folder") is no longer printed as an entry of its own listing: `ls s3://bucket/prefix/` showed `DIR prefix/` and `ls s3://bucket/prefix/*` showed `DIR s3://bucket/prefix/`. An empty folder now lists as empty, not as "no object found". Nested markers are still listed as `DIR`; `cp`, `sync` and `du` skip markers as before. (upstream [#517](https://github.com/peak/s5cmd/issues/517))
+
 #### Improvements
 - `parallel.Waiter` collects task errors and returns them from `Wait()`; callers no longer drain an error channel in a goroutine. No user-visible change.
 
