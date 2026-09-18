@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -322,6 +323,20 @@ func skipTestIfGCS(t *testing.T, format string) {
 
 	if storage.IsGoogleEndpoint(*endpoint) {
 		t.Skip(format)
+	}
+}
+
+// requireSymlinks skips the test when the process cannot create symlinks.
+// On Windows that needs Developer Mode or SeCreateSymbolicLinkPrivilege;
+// without either, os.Symlink fails with ERROR_PRIVILEGE_NOT_HELD (1314).
+// Any other error is left for the test itself to report.
+func requireSymlinks(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+	err := os.Symlink(filepath.Join(dir, "target"), filepath.Join(dir, "link"))
+	if err != nil && runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314)) {
+		t.Skipf("symlinks need Developer Mode or SeCreateSymbolicLinkPrivilege: %v", err)
 	}
 }
 

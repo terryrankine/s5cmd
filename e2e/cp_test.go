@@ -3104,6 +3104,7 @@ func TestCopyMultipleLocalNestedFilesToS3(t *testing.T) {
 // cp --no-follow-symlinks my_link s3://bucket/prefix/
 func TestCopyLinkToASingleFileWithFollowSymlinkDisabled(t *testing.T) {
 	t.Parallel()
+	requireSymlinks(t)
 
 	s3client, s5cmd := setup(t)
 
@@ -3136,6 +3137,7 @@ func TestCopyLinkToASingleFileWithFollowSymlinkDisabled(t *testing.T) {
 // cp * s3://bucket/prefix/
 func TestCopyWithFollowSymlink(t *testing.T) {
 	t.Parallel()
+	requireSymlinks(t)
 
 	s3client, s5cmd := setup(t)
 
@@ -3178,6 +3180,7 @@ func TestCopyWithFollowSymlink(t *testing.T) {
 
 func TestCopyErrorWhenGivenObjectIsNotFoundUsingWildcard(t *testing.T) {
 	t.Parallel()
+	requireSymlinks(t)
 
 	s3client, s5cmd := setup(t)
 
@@ -3209,6 +3212,7 @@ func TestCopyErrorWhenGivenObjectIsNotFoundUsingWildcard(t *testing.T) {
 // cp --no-follow-symlinks * s3://bucket/prefix/
 func TestCopyWithNoFollowSymlink(t *testing.T) {
 	t.Parallel()
+	requireSymlinks(t)
 
 	s3client, s5cmd := setup(t)
 

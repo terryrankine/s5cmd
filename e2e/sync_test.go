@@ -2193,6 +2193,7 @@ func TestSyncS3BucketToLocalWithDeleteFlag(t *testing.T) {
 // sync dir/ s3://bucket (symlink)
 func TestSyncLocalFilesWithSymlinksToS3Bucket(t *testing.T) {
 	t.Parallel()
+	requireSymlinks(t)
 
 	s3client, s5cmd := setup(t)
 
@@ -2232,6 +2233,7 @@ func TestSyncLocalFilesWithSymlinksToS3Bucket(t *testing.T) {
 // sync --no-follow-symlinks * s3://bucket/prefix/
 func TestSyncLocalFilesWithNoFollowSymlinksToS3Bucket(t *testing.T) {
 	t.Parallel()
+	requireSymlinks(t)
 
 	s3client, s5cmd := setup(t)
 
