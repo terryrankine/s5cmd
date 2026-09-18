@@ -100,8 +100,10 @@ func (f *Filesystem) expandGlob(ctx context.Context, src *url.URL, followSymlink
 
 			obj, err := f.Stat(ctx, fileurl)
 			if err != nil {
-				sendError(ctx, err, ch)
-				return
+				// report the match that cannot be read (for example a
+				// dangling symlink) and go on with the other matches.
+				sendObject(ctx, &Object{URL: fileurl, Err: err}, ch)
+				continue
 			}
 
 			if !obj.Type.IsDir() {
@@ -176,6 +178,25 @@ func walkDir(ctx context.Context, fs *Filesystem, src *url.URL, followSymlinks b
 
 			fn(obj)
 			return nil
+		},
+		// An entry that cannot be read (a dangling symlink, a directory
+		// without read permission) must not end the walk: every entry after
+		// it would be left out, without a word about any of them. Report
+		// the entry with its URL, so that callers can tell it apart from a
+		// failure of the walk itself, and go on with the rest of the tree.
+		ErrorCallback: func(pathname string, err error) godirwalk.ErrorAction {
+			if fi, lerr := os.Lstat(pathname); lerr == nil && fi.IsDir() {
+				// mark a directory as such: "--exclude dir/*" matches "dir/".
+				pathname += string(os.PathSeparator)
+			}
+			fileurl, uerr := url.New(pathname)
+			if uerr != nil {
+				fn(&Object{Err: err})
+				return godirwalk.SkipNode
+			}
+			fileurl.SetRelative(src)
+			fn(&Object{URL: fileurl, Err: err})
+			return godirwalk.SkipNode
 		},
 		FollowSymbolicLinks: followSymlinks,
 	})

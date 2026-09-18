@@ -430,6 +430,13 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 			defer close(filteredSrcObjectChannel)
 			// filter and redirect objects
 			for st := range unfilteredSrcObjectChannel {
+				// An entry that cannot be read (a dangling symlink, a
+				// directory without read permission) comes with its URL. If
+				// the user excluded it, the listing lacks nothing the sync
+				// would have used: skip it without a word.
+				if st.Err != nil && st.URL != nil && s.isFilteredOut(st.URL.Path, srcurl.Prefix) {
+					continue
+				}
 				if isListingError(st.Err) {
 					// the source listing is incomplete, so no correct plan
 					// can be made from it: report the error and stop.

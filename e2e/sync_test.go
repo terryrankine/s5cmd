@@ -4301,3 +4301,297 @@ func TestSyncS3BucketToS3BucketKeysWithShellCharacters(t *testing.T) {
 	assertLines(t, result.Stdout(), map[int]compareFunc{})
 	assertLines(t, result.Stderr(), map[int]compareFunc{})
 }
+
+// --stat sync --include "*" --exclude "work/*" ... "dir/*" s3://bucket/
+//
+// The report behind peak/s5cmd#720: a backup of a whole tree with a handful
+// of exclude patterns left out directories that no pattern names
+// (Omics/ready/INFO.md was never uploaded), while the same command run one
+// level down ("dir/Omics/*" s3://bucket/Omics/) uploaded them. Both forms must
+// upload the same files, apply the patterns relative to the source prefix,
+// and a second run must find nothing left to copy.
+func TestSyncLocalTreeToS3BucketWithExcludesUploadsUnnamedDirectories(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	folderLayout := []fs.PathOp{
+		fs.WithDir("storageA",
+			fs.WithFile("README.md", "S: readme"),
+			fs.WithDir("Omics",
+				fs.WithDir("ready", fs.WithFile("INFO.md", "S: info")),
+				fs.WithDir("raw", fs.WithFile("sample.pileup", "S: pileup")),
+				fs.WithDir("screenshots", fs.WithFile("shot.png", "S: shot")),
+			),
+			// "work/*" is anchored at the source prefix: a nested "work"
+			// directory is not excluded.
+			fs.WithDir("Genomics",
+				fs.WithDir("work", fs.WithFile("notes.txt", "S: notes")),
+			),
+			fs.WithDir("work", fs.WithFile("job.log", "S: job")),
+			fs.WithDir("test", fs.WithFile("case.txt", "S: case")),
+			fs.WithDir("Partial", fs.WithFile("part.bin", "S: part")),
+		),
+	}
+
+	workdir := fs.NewDir(t, "somedir", folderLayout...)
+	defer workdir.Remove()
+
+	filters := []string{
+		"--include", "*",
+		"--exclude", "work/*",
+		"--exclude", "test/*",
+		"--exclude", "Partial/*",
+		"--exclude", "*screen*",
+		"--exclude", "*.pileup",
+	}
+
+	root := filepath.ToSlash(workdir.Join("storageA"))
+	dst := fmt.Sprintf("s3://%v/", bucket)
+
+	uploaded := map[string]string{
+		"README.md":               "S: readme",
+		"Omics/ready/INFO.md":     "S: info",
+		"Genomics/work/notes.txt": "S: notes",
+	}
+	excluded := map[string]string{
+		"Omics/raw/sample.pileup":    "S: pileup",
+		"Omics/screenshots/shot.png": "S: shot",
+		"work/job.log":               "S: job",
+		"test/case.txt":              "S: case",
+		"Partial/part.bin":           "S: part",
+	}
+
+	// 1. the whole tree, as reported.
+	args := append([]string{"--stat", "sync"}, filters...)
+	args = append(args, root+"/*", dst)
+	cmd := s5cmd(args...)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	output, stats := splitStatTable(t, result.Stdout())
+	assertLines(t, output, map[int]compareFunc{
+		0: equals(`cp %v/Genomics/work/notes.txt %vGenomics/work/notes.txt`, root, dst),
+		1: equals(`cp %v/Omics/ready/INFO.md %vOmics/ready/INFO.md`, root, dst),
+		2: equals(`cp %v/README.md %vREADME.md`, root, dst),
+	}, sortInput(true))
+	assert.DeepEqual(t, stats, map[string]string{
+		"cp":   "3 0 3",
+		"sync": "1 0 1",
+	})
+
+	for key, content := range uploaded {
+		assert.Assert(t, ensureS3Object(s3client, bucket, key, content))
+	}
+	for key, content := range excluded {
+		err := ensureS3Object(s3client, bucket, key, content)
+		assertError(t, err, errS3NoSuchKey)
+	}
+
+	// the reporter's check: the directory is listable in the bucket.
+	cmd = s5cmd("ls", dst+"Omics/ready/")
+	result = icmd.RunCmd(cmd)
+	result.Assert(t, icmd.Success)
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: suffix("INFO.md"),
+	})
+
+	// 2. the same command again: everything is in sync, nothing to copy.
+	cmd = s5cmd(args...)
+	result = icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	output, stats = splitStatTable(t, result.Stdout())
+	assert.Equal(t, strings.TrimSpace(output), "")
+	assert.DeepEqual(t, stats, map[string]string{
+		"sync": "1 0 1",
+	})
+
+	// 3. one level down, into a fresh bucket: the same Omics files as 1.
+	bucket2 := bucket + "-omics"
+	createBucket(t, s3client, bucket2)
+	dst2 := fmt.Sprintf("s3://%v/Omics/", bucket2)
+
+	args = append([]string{"--stat", "sync"}, filters...)
+	args = append(args, root+"/Omics/*", dst2)
+	cmd = s5cmd(args...)
+	result = icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	output, stats = splitStatTable(t, result.Stdout())
+	assertLines(t, output, map[int]compareFunc{
+		0: equals(`cp %v/Omics/ready/INFO.md %vready/INFO.md`, root, dst2),
+	})
+	assert.DeepEqual(t, stats, map[string]string{
+		"cp":   "1 0 1",
+		"sync": "1 0 1",
+	})
+
+	assert.Assert(t, ensureS3Object(s3client, bucket2, "Omics/ready/INFO.md", "S: info"))
+	for _, key := range []string{"Omics/raw/sample.pileup", "Omics/screenshots/shot.png"} {
+		err := ensureS3Object(s3client, bucket2, key, excluded[key])
+		assertError(t, err, errS3NoSuchKey)
+	}
+
+	// the local tree is untouched.
+	expected := fs.Expected(t, folderLayout...)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+}
+
+// sync --exclude "work/*" --exclude "*screen*" "dir/*" s3://bucket/
+// (excluded entries cannot be read)
+//
+// The likely shape of peak/s5cmd#720: the tree holds dangling symlinks
+// (pipeline work directories are full of them) and the user excludes them.
+// Following such a link fails, and that used to end the whole directory walk:
+// every file after the link in the same top-level directory was silently
+// left out. On this branch the walk error stops the sync instead. Neither is
+// right when the entry is excluded: it is not part of the sync, so it must
+// not fail it. Unreadable entries that are not excluded still stop the sync
+// (see TestSyncLocalFolderWithDanglingSymlinkToS3BucketWithDelete).
+func TestSyncLocalTreeToS3BucketSkipsUnreadableExcludedEntries(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs a privilege on windows")
+	}
+
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	folderLayout := []fs.PathOp{
+		fs.WithDir("storageA",
+			// a dangling link matched by the glob itself, excluded by *screen*
+			fs.WithSymlink("Ascreen", "does-not-exist"),
+			fs.WithDir("Omics",
+				// a dangling link inside a walked directory, excluded by *screen*
+				fs.WithSymlink("a-screen.png", "does-not-exist"),
+				fs.WithDir("ready", fs.WithFile("INFO.md", "S: info")),
+			),
+			fs.WithDir("work",
+				// a directory nobody can read, excluded by work/*
+				fs.WithDir("locked", fs.WithFile("secret", "S: secret"), fs.WithMode(0)),
+				fs.WithSymlink("stale", "does-not-exist"),
+				fs.WithFile("job.log", "S: job"),
+			),
+			fs.WithFile("zz.txt", "S: zz"),
+		),
+	}
+
+	workdir := fs.NewDir(t, "somedir", folderLayout...)
+	defer func() {
+		_ = os.Chmod(workdir.Join("storageA", "work", "locked"), 0o755)
+		workdir.Remove()
+	}()
+
+	root := filepath.ToSlash(workdir.Join("storageA"))
+	dst := fmt.Sprintf("s3://%v/", bucket)
+
+	cmd := s5cmd("sync", "--exclude", "work/*", "--exclude", "*screen*", root+"/*", dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp %v/Omics/ready/INFO.md %vOmics/ready/INFO.md`, root, dst),
+		1: equals(`cp %v/zz.txt %vzz.txt`, root, dst),
+	}, sortInput(true))
+
+	assert.Assert(t, ensureS3Object(s3client, bucket, "Omics/ready/INFO.md", "S: info"))
+	assert.Assert(t, ensureS3Object(s3client, bucket, "zz.txt", "S: zz"))
+
+	err := ensureS3Object(s3client, bucket, "work/job.log", "S: job")
+	assertError(t, err, errS3NoSuchKey)
+}
+
+// sync "dir/*" s3://bucket/ (an entry that is not excluded cannot be read)
+//
+// The walk must go on past the entry so that the error names it, and the
+// sync must still stop: with an incomplete listing no correct plan exists.
+func TestSyncLocalTreeToS3BucketReportsUnreadableEntry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs a privilege on windows")
+	}
+
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	folderLayout := []fs.PathOp{
+		fs.WithDir("Omics",
+			fs.WithSymlink("a-link", "does-not-exist"),
+			fs.WithDir("ready", fs.WithFile("INFO.md", "S: info")),
+		),
+	}
+
+	workdir := fs.NewDir(t, "somedir", folderLayout...)
+	defer workdir.Remove()
+
+	src := filepath.ToSlash(workdir.Path())
+	dst := fmt.Sprintf("s3://%v/", bucket)
+
+	cmd := s5cmd("sync", src+"/*", dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: contains(`ERROR "sync %v/* %v": given object %v/Omics/a-link not found`, src, dst, src),
+	})
+}
+
+// sync "dir/*" s3://bucket/ (a directory that is not excluded cannot be read)
+//
+// Same rule as for an unreadable file: the walk goes on, the error names the
+// directory, and the sync stops.
+func TestSyncLocalTreeToS3BucketReportsUnreadableDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes are not enforced on windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can read any directory")
+	}
+
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	folderLayout := []fs.PathOp{
+		fs.WithDir("Omics",
+			fs.WithDir("locked", fs.WithFile("secret", "S: secret"), fs.WithMode(0)),
+			fs.WithDir("ready", fs.WithFile("INFO.md", "S: info")),
+		),
+	}
+
+	workdir := fs.NewDir(t, "somedir", folderLayout...)
+	defer func() {
+		_ = os.Chmod(workdir.Join("Omics", "locked"), 0o755)
+		workdir.Remove()
+	}()
+
+	src := filepath.ToSlash(workdir.Path())
+	dst := fmt.Sprintf("s3://%v/", bucket)
+
+	cmd := s5cmd("sync", src+"/*", dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: contains(`ERROR "sync %v/* %v": open %v/Omics/locked: permission denied`, src, dst, src),
+	})
+}
