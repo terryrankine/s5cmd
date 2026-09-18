@@ -78,6 +78,7 @@ type setupOpts struct {
 	region      string
 	timeSource  gofakes3.TimeSource
 	enableProxy bool
+	backend     *gofakes3.Backend
 }
 
 type option func(*setupOpts)
@@ -124,6 +125,14 @@ func withProxy() option {
 	}
 }
 
+// withBackend hands the fake server's storage backend back to the caller.
+// It stays nil when the tests run against a real endpoint.
+func withBackend(backend *gofakes3.Backend) option {
+	return func(opts *setupOpts) {
+		opts.backend = backend
+	}
+}
+
 type credentialCfg struct {
 	AccessKeyID string
 	SecretKey   string
@@ -148,7 +157,11 @@ func setup(t *testing.T, options ...option) (*s3.S3, func(...string) icmd.Cmd) {
 	if isEndpointFromEnv() {
 		endpoint = os.Getenv(s5cmdTestEndpointEnv)
 	} else {
-		endpoint = server(t, testdir, opts)
+		var backend gofakes3.Backend
+		endpoint, backend = server(t, testdir, opts)
+		if opts.backend != nil {
+			*opts.backend = backend
+		}
 	}
 
 	// one of the tests check if s5cmd correctly fails when an incorrect endpoint is given.
@@ -205,7 +218,7 @@ func workdir(t *testing.T) (*fs.Dir, string) {
 	return testdir, workdir
 }
 
-func server(t *testing.T, testdir *fs.Dir, opts *setupOpts) string {
+func server(t *testing.T, testdir *fs.Dir, opts *setupOpts) (string, gofakes3.Backend) {
 	t.Helper()
 
 	s3LogLevel := *flagTestLogLevel
@@ -214,9 +227,7 @@ func server(t *testing.T, testdir *fs.Dir, opts *setupOpts) string {
 		s3LogLevel = "info" // aws has no level other than 'debug'
 	}
 
-	endpoint := s3ServerEndpoint(t, testdir, s3LogLevel, opts.s3backend, opts.timeSource, opts.enableProxy)
-
-	return endpoint
+	return s3ServerEndpoint(t, testdir, s3LogLevel, opts.s3backend, opts.timeSource, opts.enableProxy)
 }
 
 func s3client(t *testing.T, options storage.Options, creds *credentialCfg) *s3.S3 {
@@ -770,6 +781,56 @@ func putFile(t *testing.T, client *s3.S3, bucket string, filename string, conten
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// putDirectoryMarker creates a zero-byte object whose key ends with "/".
+//
+// gofakes3 trims trailing slashes from request paths, so such a key cannot be
+// created through its HTTP API. When the fake backend is available the object
+// is written to it directly; otherwise a plain PutObject is used.
+func putDirectoryMarker(t *testing.T, client *s3.S3, backend gofakes3.Backend, bucket, key string) {
+	t.Helper()
+
+	if backend == nil {
+		putFile(t, client, bucket, key, "")
+		return
+	}
+
+	if _, err := backend.PutObject(bucket, key, nil, strings.NewReader(""), 0, gofakes3.StorageStandard); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// s3ObjectExists reports whether the object is in the bucket. It reads the
+// fake backend directly when one is given, for the same reason as
+// putDirectoryMarker.
+func s3ObjectExists(t *testing.T, client *s3.S3, backend gofakes3.Backend, bucket, key string) bool {
+	t.Helper()
+
+	if backend == nil {
+		_, err := client.HeadObject(&s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		if err == nil {
+			return true
+		}
+		if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == "NotFound" {
+			return false
+		}
+		t.Fatal(err)
+	}
+
+	obj, err := backend.HeadObject(bucket, key)
+	if err == nil {
+		obj.Contents.Close()
+		return true
+	}
+	if gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchKey) {
+		return false
+	}
+	t.Fatal(err)
+	return false
 }
 
 func replaceMatchWithSpace(input string, match ...string) string {

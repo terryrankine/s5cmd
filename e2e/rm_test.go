@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/igungor/gofakes3"
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/fs"
 	"gotest.tools/v3/icmd"
@@ -787,6 +788,76 @@ func TestRemoveS3PrefixRawFlag(t *testing.T) {
 	for filename, content := range filesToContent {
 		assert.Assert(t, ensureS3Object(s3client, bucket, filename, content))
 	}
+}
+
+// rm --raw s3://bucket/dir/
+//
+// A directory marker is a zero-byte object whose key ends with "/". With
+// --raw the trailing slash is part of the exact key, not a prefix, so only
+// the marker is deleted and objects under it are left alone.
+func TestRemoveS3DirectoryMarkerRawFlag(t *testing.T) {
+	t.Parallel()
+
+	var backend gofakes3.Backend
+	s3client, s5cmd := setup(t, withBackend(&backend))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const (
+		marker   = "dir/"
+		filename = "dir/file.txt"
+		content  = "this is a test file"
+	)
+
+	putDirectoryMarker(t, s3client, backend, bucket, marker)
+	putFile(t, s3client, bucket, filename, content)
+
+	cmd := s5cmd("rm", "--raw", "s3://"+bucket+"/"+marker)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`rm s3://%v/%v`, bucket, marker),
+	})
+
+	// the marker is gone
+	assert.Assert(t, !s3ObjectExists(t, s3client, backend, bucket, marker))
+
+	// the object under the marker is untouched
+	assert.Assert(t, ensureS3Object(s3client, bucket, filename, content))
+}
+
+// rm s3://bucket/dir/
+func TestRemoveS3DirectoryMarkerWithoutRawFlag(t *testing.T) {
+	t.Parallel()
+
+	var backend gofakes3.Backend
+	s3client, s5cmd := setup(t, withBackend(&backend))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const marker = "dir/"
+
+	putDirectoryMarker(t, s3client, backend, bucket, marker)
+
+	src := "s3://" + bucket + "/" + marker
+
+	cmd := s5cmd("rm", src)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: equals(`ERROR "rm %v": s3 bucket/prefix cannot be used for delete operations (forgot wildcard character?)`, src),
+	})
+
+	// the marker is still there
+	assert.Assert(t, s3ObjectExists(t, s3client, backend, bucket, marker))
 }
 
 // rm --exclude "*.txt" s3://bucket/*

@@ -54,6 +54,9 @@ Examples:
 
 	10. Delete all versions of all objects in the bucket
 		 > s5cmd {{.HelpName}} --all-versions "s3://bucket/*"
+
+	11. Delete a directory-marker object (a zero-byte object whose key ends with "/")
+		 > s5cmd {{.HelpName}} --raw s3://bucketname/prefix/
 `
 
 func NewDeleteCommand() *cli.Command {
@@ -178,13 +181,7 @@ func (d Delete) Run(ctx context.Context) error {
 		defer close(urlch)
 
 		for object := range objch {
-			if errorpkg.IsCancelation(object.Err) {
-				continue
-			}
-
-			// Skip directories from local filesystem but allow S3 "directory"
-			// objects (keys ending in /) to be deleted (#707, #834)
-			if object.Type.IsDir() && !object.URL.IsRemote() {
+			if object.Type.IsDir() || errorpkg.IsCancelation(object.Err) {
 				continue
 			}
 
@@ -281,7 +278,10 @@ func validateRMCommand(c *cli.Context) error {
 	)
 	for i, srcurl := range srcurls {
 		// we don't operate on S3 prefixes for copy and delete operations.
-		if srcurl.IsBucket() || srcurl.IsPrefix() {
+		// With --raw the user has opted out of wildcard and prefix treatment,
+		// so a key ending in "/" is an exact object key (a directory marker)
+		// and must be allowed through.
+		if srcurl.IsBucket() || (srcurl.IsPrefix() && !srcurl.IsRaw()) {
 			return fmt.Errorf("s3 bucket/prefix cannot be used for delete operations (forgot wildcard character?)")
 		}
 

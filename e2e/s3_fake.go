@@ -12,7 +12,9 @@ import (
 	"gotest.tools/v3/fs"
 )
 
-func s3ServerEndpoint(t *testing.T, testdir *fs.Dir, loglvl, backend string, timeSource gofakes3.TimeSource, enableProxy bool) string {
+// s3ServerEndpoint starts a fake S3 server and returns its endpoint URL along
+// with the backend it stores objects in.
+func s3ServerEndpoint(t *testing.T, testdir *fs.Dir, loglvl, backend string, timeSource gofakes3.TimeSource, enableProxy bool) (string, gofakes3.Backend) {
 	var s3backend gofakes3.Backend
 	switch backend {
 	case "mem":
@@ -65,7 +67,7 @@ func s3ServerEndpoint(t *testing.T, testdir *fs.Dir, loglvl, backend string, tim
 			t.Fatal(err)
 		}
 		proxyEnabledURL := "http://localhost.:" + parsedURL.Port()
-		return proxyEnabledURL
+		return proxyEnabledURL, s3backend
 	}
-	return s3srv.URL
+	return s3srv.URL, s3backend
 }
