@@ -4,3 +4,6 @@
 /s5cmd.exe
 /*.iml
 .DS_Store
+
+# rapid property-test failure reproductions
+testdata/rapid/
