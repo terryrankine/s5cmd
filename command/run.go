@@ -87,15 +87,6 @@ func (r Run) Run(ctx context.Context) error {
 
 	waiter := parallel.NewWaiter()
 
-	var errDoneCh = make(chan struct{})
-	var merrorWaiter error
-	go func() {
-		defer close(errDoneCh)
-		for err := range waiter.Err() {
-			merrorWaiter = multierror.Append(merrorWaiter, err)
-		}
-	}()
-
 	reader := NewReader(ctx, r.reader)
 
 	lineno := -1
@@ -150,8 +141,7 @@ func (r Run) Run(ctx context.Context) error {
 		pm.Run(fn, waiter)
 	}
 
-	waiter.Wait()
-	<-errDoneCh
+	merrorWaiter := waiter.Wait()
 
 	if reader.Err() != nil {
 		printError(commandFromContext(r.c), r.c.Command.Name, reader.Err())

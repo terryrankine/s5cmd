@@ -119,3 +119,24 @@ Assumptions and edge cases checked:
 - **P5 local destination.** `sync --delete --exclude` S3→local was untested; added `TestSyncS3BucketToLocalWithDeleteAndExcludeFilter` (fails on v2.4.0, passes now). The *copy* side still has the raw-prefix limitation: `--exclude "sub/*"` does not stop `sub/new.log` being uploaded. Separate fix.
 - **Dockerfile.** `golang:1.24-alpine` was an EOL toolchain for the release image; now 1.27. `alpine:3.20` reaches EOL Nov 2026 — bump before then.
 - **Windows dev.** 9 symlink e2e tests fail without Developer Mode; CI's Windows runners have the privilege. Could `t.Skip` on `ERROR_PRIVILEGE_NOT_HELD`.
+
+## Plan from 2026-09-18: review and fix everything left, in order
+
+Loop per item: worktree → reproducing test first → fix → line-by-line review → full suite (Linux `-race` + Windows) → merge. Releases batch: **v2.5.0** after items 2–11, **v2.6.0** after the features.
+
+| # | Item | State |
+|---|---|---|
+| 1 | Quarterly upstream triage (workflow; AI routine needs GitHub connected to the Claude account) | PR #33 |
+| 2 | `Waiter` collects errors internally; per-error handler replaces the drain goroutines | this PR |
+| 3 | `--exit-on-error` → stop on first cp/rm failure | next |
+| 4 | Fork Homebrew tap | |
+| 5 | #745 OOM on large sync | |
+| 6 | #751 sync listing incomplete with UTF-8 keys | |
+| 7 | #720 strange sync behaviour | |
+| 8 | #845 cp timezone | |
+| 9 | #517 keys ending in `/` | |
+| 10 | #810 "no match found" for local destination | |
+| 11 | #800 / #749 symlink download errors | |
+| 12+ | features: #532/#350 preserve timestamps/permissions, #433 bandwidth limit, #528 resume, #561 hash sync (PR #799), #700 per-side endpoints, #808 SSE-C, #803 tagging, #697 dry-run marker, #796 nothing-to-sync line | v2.6.0 |
+
+"Not a bug, with tests" is an acceptable outcome for 5–11 (two of the earlier batch were).

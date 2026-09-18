@@ -201,16 +201,6 @@ func (f *Filesystem) MultiDelete(ctx context.Context, urlch <-chan *url.URL) <-c
 
 		waiter := parallel.NewWaiter()
 
-		// every result, including failures, is sent on resultch, so tasks
-		// never return an error. Drain the waiter anyway so that a task can
-		// never block on the error channel.
-		errDoneCh := make(chan struct{})
-		go func() {
-			defer close(errDoneCh)
-			for range waiter.Err() {
-			}
-		}()
-
 		for url := range urlch {
 			url := url
 			parallel.Run(func() error {
@@ -223,7 +213,6 @@ func (f *Filesystem) MultiDelete(ctx context.Context, urlch <-chan *url.URL) <-c
 		}
 
 		waiter.Wait()
-		<-errDoneCh
 	}()
 	return resultch
 }

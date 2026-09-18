@@ -1269,16 +1269,6 @@ func (s *S3) MultiDelete(ctx context.Context, urlch <-chan *url.URL) <-chan *Obj
 
 		waiter := parallel.NewWaiter()
 
-		// doDelete reports every failure through resultch, so tasks never
-		// return an error. Drain the waiter anyway so that a task can never
-		// block on the error channel.
-		errDoneCh := make(chan struct{})
-		go func() {
-			defer close(errDoneCh)
-			for range waiter.Err() {
-			}
-		}()
-
 		for chunk := range s.calculateChunks(urlch) {
 			chunk := chunk
 			parallel.Run(func() error {
@@ -1288,7 +1278,6 @@ func (s *S3) MultiDelete(ctx context.Context, urlch <-chan *url.URL) <-chan *Obj
 		}
 
 		waiter.Wait()
-		<-errDoneCh
 	}()
 
 	return resultch

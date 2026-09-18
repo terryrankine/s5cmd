@@ -314,23 +314,13 @@ func (s Select) Run(ctx context.Context) error {
 		return err
 	}
 
-	var (
-		merrorWaiter  error
-		merrorObjects error
-	)
+	var merrorObjects error
 
-	waiter := parallel.NewWaiter()
-	errDoneCh := make(chan struct{})
+	waiter := parallel.NewWaiter(parallel.WithErrorHandler(func(err error) {
+		printError(s.fullCommand, s.op, err)
+	}))
 	writeDoneCh := make(chan struct{})
 	resultCh := make(chan json.RawMessage, 128)
-
-	go func() {
-		defer close(errDoneCh)
-		for err := range waiter.Err() {
-			printError(s.fullCommand, s.op, err)
-			merrorWaiter = multierror.Append(merrorWaiter, err)
-		}
-	}()
 
 	go func() {
 		defer close(writeDoneCh)
@@ -388,9 +378,8 @@ func (s Select) Run(ctx context.Context) error {
 
 	}
 
-	waiter.Wait()
+	merrorWaiter := waiter.Wait()
 	close(resultCh)
-	<-errDoneCh
 	<-writeDoneCh
 
 	return multierror.Append(merrorWaiter, merrorObjects).ErrorOrNil()
