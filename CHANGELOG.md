@@ -1,4 +1,7 @@
 # Changelog
+
+Minor and major releases are described here. Patch releases (dependency, security and toolchain updates) are automatic and listed on the [Releases](https://github.com/terryrankine/s5cmd/releases) page with notes generated from their commits.
+
 ## v2.4.2 - 18 Sep 2026
 
 #### Security

@@ -91,13 +91,9 @@ jobs:
         run: |
           notes=$(python3 .github/scripts/release-notes.py "$TAG")
           if [ -z "$notes" ]; then
-            # automatic patch release: the CHANGELOG PR lands after the tag
-            last=$(git describe --tags --abbrev=0 --match 'v*' "$TAG^" 2>/dev/null || true)
-            since=$( [ -n "$last" ] && git log -1 --format=%cI "$last" || echo 1970-01-01 )
-            notes="#### Dependencies and toolchain
-          Automatic patch release.
-
-          $(gh pr list --state merged --base master --search "merged:>=$since -head:maintenance/changelog-" --json number,title --jq '.[] | "- \(.title) (#\(.number))"')"
+            # no hand-written section (automatic patch release): use the
+            # notes goreleaser generated from the commits since the last tag
+            notes=$(gh release view "$TAG" --json body --jq .body)
           fi
           { echo "$notes"; echo; echo "Docker image: ghcr.io/${GITHUB_REPOSITORY,,}:$TAG"; } > notes.md
           gh release edit "$TAG" --title "$TAG" --notes-file notes.md --draft=false --latest
