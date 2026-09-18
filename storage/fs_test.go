@@ -1,9 +1,14 @@
 package storage
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/peak/s5cmd/v2/parallel"
+	"github.com/peak/s5cmd/v2/storage/url"
 )
 
 func TestFilesystemImplementsStorageInterface(t *testing.T) {
@@ -78,5 +83,75 @@ func TestFilesystemCreateDryRun(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected no files in temp dir during dry run, got %d", len(entries))
+	}
+}
+
+// TestFilesystemMultiDelete checks that every file sent to MultiDelete is
+// removed and reported exactly once, including failures, when the deletes
+// run on the parallel manager.
+func TestFilesystemMultiDelete(t *testing.T) {
+	const numFiles = 50
+
+	parallel.Init(4)
+	defer parallel.Close()
+
+	fs := &Filesystem{}
+	tmpDir := t.TempDir()
+
+	var paths []string
+	for i := 0; i < numFiles; i++ {
+		path := filepath.Join(tmpDir, fmt.Sprintf("file-%02d.txt", i))
+		if err := os.WriteFile(path, []byte("content"), 0644); err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+		paths = append(paths, path)
+	}
+	missing := filepath.Join(tmpDir, "missing.txt")
+	paths = append(paths, missing)
+
+	urlch := make(chan *url.URL)
+	go func() {
+		defer close(urlch)
+		for _, path := range paths {
+			u, err := url.New(path)
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+			urlch <- u
+		}
+	}()
+
+	seen := make(map[string]int)
+	for obj := range fs.MultiDelete(context.Background(), urlch) {
+		path := filepath.Clean(obj.URL.Absolute())
+		seen[path]++
+
+		if path == missing {
+			if obj.Err == nil {
+				t.Errorf("expected an error for %q", path)
+			}
+			continue
+		}
+		if obj.Err != nil {
+			t.Errorf("unexpected error for %q: %v", path, obj.Err)
+		}
+	}
+
+	if len(seen) != len(paths) {
+		t.Errorf("expected %d results, got %d", len(paths), len(seen))
+	}
+	for _, path := range paths {
+		if seen[path] != 1 {
+			t.Errorf("expected %q to be reported once, got %d", path, seen[path])
+		}
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir failed: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected all files to be removed, %d left", len(entries))
 	}
 }

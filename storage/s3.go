@@ -32,6 +32,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3/s3manager/s3manageriface"
 
 	"github.com/peak/s5cmd/v2/log"
+	"github.com/peak/s5cmd/v2/parallel"
 	"github.com/peak/s5cmd/v2/storage/url"
 )
 
@@ -1253,35 +1254,41 @@ func (s *S3) doDelete(ctx context.Context, chunk chunk, resultch chan *Object) {
 }
 
 // MultiDelete is a asynchronous removal operation for multiple objects.
-// It reads given url channel, creates multiple chunks and run these
-// chunks in parallel. Each chunk may have at most 1000 objects since DeleteObjects
-// API has a limitation.
+// It reads given url channel, creates multiple chunks and runs these
+// chunks in parallel on the global parallel manager, so the number of
+// in-flight DeleteObjects requests is bounded by '-numworkers' just like
+// the other commands. Chunks are dispatched as soon as they fill, so
+// deletes start while the listing is still in progress. Each chunk may
+// have at most 1000 objects since DeleteObjects API has a limitation.
 // See: https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html.
 func (s *S3) MultiDelete(ctx context.Context, urlch <-chan *url.URL) <-chan *Object {
 	resultch := make(chan *Object)
 
 	go func() {
-		sem := make(chan struct{}, 10)
-		defer close(sem)
 		defer close(resultch)
 
-		chunks := s.calculateChunks(urlch)
+		waiter := parallel.NewWaiter()
 
-		var wg sync.WaitGroup
-		for chunk := range chunks {
+		// doDelete reports every failure through resultch, so tasks never
+		// return an error. Drain the waiter anyway so that a task can never
+		// block on the error channel.
+		errDoneCh := make(chan struct{})
+		go func() {
+			defer close(errDoneCh)
+			for range waiter.Err() {
+			}
+		}()
+
+		for chunk := range s.calculateChunks(urlch) {
 			chunk := chunk
-
-			wg.Add(1)
-			sem <- struct{}{}
-
-			go func() {
-				defer wg.Done()
+			parallel.Run(func() error {
 				s.doDelete(ctx, chunk, resultch)
-				<-sem
-			}()
+				return nil
+			}, waiter)
 		}
 
-		wg.Wait()
+		waiter.Wait()
+		<-errDoneCh
 	}()
 
 	return resultch

@@ -13,6 +13,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"gotest.tools/v3/assert"
 
 	"github.com/peak/s5cmd/v2/log"
+	"github.com/peak/s5cmd/v2/parallel"
 	"github.com/peak/s5cmd/v2/storage/url"
 )
 
@@ -1579,4 +1581,128 @@ func TestNewMultipartCopyInput(t *testing.T) {
 			t.Errorf("expected no KMS key when request sets a non-KMS encryption, got %v", aws.StringValue(got.SSEKMSKeyId))
 		}
 	})
+}
+
+// TestS3MultiDeleteConcurrency submits more keys than fit in a single
+// DeleteObjects request and checks that every key is reported exactly once,
+// that the 1000-key chunks are sent concurrently, and that the number of
+// in-flight requests is bounded by the parallel manager's worker count.
+func TestS3MultiDeleteConcurrency(t *testing.T) {
+	const numKeys = 3*deleteObjectsMax + 1 // 4 chunks: 1000, 1000, 1000, 1
+
+	testcases := []struct {
+		name          string
+		numWorkers    int
+		wantInFlight  int
+		requestDelay  time.Duration
+		blockUntilAll bool
+	}{
+		{
+			// with plenty of workers every chunk must be in flight at the
+			// same time: the mock blocks each request until all of them
+			// have arrived, so a sequential implementation deadlocks
+			// (caught by the timeout below) instead of passing.
+			name:          "chunks are dispatched concurrently",
+			numWorkers:    16,
+			wantInFlight:  4,
+			blockUntilAll: true,
+		},
+		{
+			// with fewer workers than chunks the in-flight requests must
+			// never exceed -numworkers.
+			name:         "in-flight requests are bounded by numworkers",
+			numWorkers:   2,
+			wantInFlight: 2,
+			requestDelay: 100 * time.Millisecond,
+		},
+	}
+
+	for _, tc := range testcases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			parallel.Init(tc.numWorkers)
+			defer parallel.Close()
+
+			var (
+				mu          sync.Mutex
+				inFlight    int
+				maxInFlight int
+				allInFlight = make(chan struct{})
+			)
+
+			mockAPI := s3.New(unit.Session)
+			mockS3 := &S3{api: mockAPI}
+
+			mockAPI.Handlers.Send.Clear()
+			mockAPI.Handlers.Unmarshal.Clear()
+			mockAPI.Handlers.UnmarshalMeta.Clear()
+			mockAPI.Handlers.ValidateResponse.Clear()
+			mockAPI.Handlers.Unmarshal.PushBack(func(r *request.Request) {
+				input := r.Params.(*s3.DeleteObjectsInput)
+
+				mu.Lock()
+				inFlight++
+				if inFlight > maxInFlight {
+					maxInFlight = inFlight
+				}
+				if inFlight == tc.wantInFlight && tc.blockUntilAll {
+					close(allInFlight)
+				}
+				mu.Unlock()
+
+				if tc.blockUntilAll {
+					select {
+					case <-allInFlight:
+					case <-time.After(5 * time.Second):
+						t.Errorf("timed out waiting for %d concurrent DeleteObjects requests", tc.wantInFlight)
+					}
+				}
+				time.Sleep(tc.requestDelay)
+
+				deleted := make([]*s3.DeletedObject, 0, len(input.Delete.Objects))
+				for _, o := range input.Delete.Objects {
+					deleted = append(deleted, &s3.DeletedObject{Key: o.Key})
+				}
+				r.Data.(*s3.DeleteObjectsOutput).Deleted = deleted
+
+				mu.Lock()
+				inFlight--
+				mu.Unlock()
+			})
+
+			urlch := make(chan *url.URL)
+			go func() {
+				defer close(urlch)
+				for i := 0; i < numKeys; i++ {
+					u, err := url.New(fmt.Sprintf("s3://bucket/key-%05d", i))
+					if err != nil {
+						t.Errorf("unexpected error: %v", err)
+						return
+					}
+					urlch <- u
+				}
+			}()
+
+			seen := make(map[string]int)
+			for obj := range mockS3.MultiDelete(context.Background(), urlch) {
+				if obj.Err != nil {
+					t.Errorf("unexpected error: %v", obj.Err)
+					continue
+				}
+				seen[obj.URL.Absolute()]++
+			}
+
+			if len(seen) != numKeys {
+				t.Errorf("expected %d unique results, got %d", numKeys, len(seen))
+			}
+			for key, n := range seen {
+				if n != 1 {
+					t.Errorf("expected %q to be reported once, got %d", key, n)
+				}
+			}
+			if maxInFlight != tc.wantInFlight {
+				t.Errorf("expected max %d in-flight DeleteObjects requests, got %d", tc.wantInFlight, maxInFlight)
+			}
+		})
+	}
 }

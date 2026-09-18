@@ -1,6 +1,9 @@
 # Changelog
 ## Unreleased
 
+#### Improvements
+- `rm` now runs its DeleteObjects batches on the shared worker pool, so the number of in-flight delete requests follows `--numworkers` (default 256) instead of a hardcoded limit of 10. Local filesystem removals run in parallel too. (upstream [#870](https://github.com/peak/s5cmd/issues/870), [#844](https://github.com/peak/s5cmd/issues/844))
+
 #### Bugfixes
 - Fixed `--dry-run` downloads closing stdin: the placeholder file handle wrapped fd 0, so `s5cmd --dry-run run < commands` hung after the first download. Regression in v2.4.0. (upstream [#879](https://github.com/peak/s5cmd/pull/879))
 - Fixed `sync --delete` with `--exclude`/`--include`: filters were re-applied by the generated `rm --raw` against full keys, so `folder/*` never matched and `--include` deleted nothing. ([#815](https://github.com/peak/s5cmd/issues/815), upstream [#883](https://github.com/peak/s5cmd/pull/883))

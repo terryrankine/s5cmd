@@ -11,6 +11,7 @@ import (
 	"github.com/karrick/godirwalk"
 	"github.com/termie/go-shutil"
 
+	"github.com/peak/s5cmd/v2/parallel"
 	"github.com/peak/s5cmd/v2/storage/url"
 )
 
@@ -189,20 +190,39 @@ func (f *Filesystem) Delete(ctx context.Context, url *url.URL) error {
 	return os.Remove(url.Absolute())
 }
 
-// MultiDelete deletes all files returned from given channel.
+// MultiDelete deletes all files returned from given channel. Files are
+// removed in parallel on the global parallel manager, bounded by
+// '-numworkers'.
 func (f *Filesystem) MultiDelete(ctx context.Context, urlch <-chan *url.URL) <-chan *Object {
 	resultch := make(chan *Object)
 	go func() {
 		defer close(resultch)
 
-		for url := range urlch {
-			err := f.Delete(ctx, url)
-			obj := &Object{
-				URL: url,
-				Err: err,
+		waiter := parallel.NewWaiter()
+
+		// every result, including failures, is sent on resultch, so tasks
+		// never return an error. Drain the waiter anyway so that a task can
+		// never block on the error channel.
+		errDoneCh := make(chan struct{})
+		go func() {
+			defer close(errDoneCh)
+			for range waiter.Err() {
 			}
-			resultch <- obj
+		}()
+
+		for url := range urlch {
+			url := url
+			parallel.Run(func() error {
+				resultch <- &Object{
+					URL: url,
+					Err: f.Delete(ctx, url),
+				}
+				return nil
+			}, waiter)
 		}
+
+		waiter.Wait()
+		<-errDoneCh
 	}()
 	return resultch
 }
