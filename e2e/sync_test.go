@@ -4595,3 +4595,55 @@ func TestSyncLocalTreeToS3BucketReportsUnreadableDirectory(t *testing.T) {
 		0: contains(`ERROR "sync %v/* %v": open %v/Omics/locked: permission denied`, src, dst, src),
 	})
 }
+
+// sync --delete s3://bucket/* s3://destbucket/
+//
+// More destination-only objects than one generated rm command holds: sync
+// writes them in batches (see command.syncDeleteBatchSize), and every batch
+// must be deleted. One rm command holding every object, plus a goroutine per
+// object inside rm, made a large sync --delete run out of memory (upstream
+// peak/s5cmd#745).
+func TestSyncS3BucketToS3BucketWithDeleteManyObjects(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	dstbucket := s3BucketFromTestNameWithPrefix(t, "dst")
+	createBucket(t, s3client, bucket)
+	createBucket(t, s3client, dstbucket)
+
+	// one more than a batch, so the last batch is a partial one.
+	const numDestOnly = 1001
+
+	putFile(t, s3client, bucket, "keep.txt", "S: this file is in both")
+	putFile(t, s3client, dstbucket, "keep.txt", "S: this file is in both")
+
+	destOnly := make([]string, 0, numDestOnly)
+	for i := 0; i < numDestOnly; i++ {
+		key := fmt.Sprintf("old/obj-%04d.txt", i)
+		destOnly = append(destOnly, key)
+		putFile(t, s3client, dstbucket, key, "D: only in destination")
+	}
+
+	src := fmt.Sprintf("s3://%v/", bucket)
+	dst := fmt.Sprintf("s3://%v/", dstbucket)
+
+	cmd := s5cmd("sync", "--delete", src+"*", dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	expected := make(map[int]compareFunc, numDestOnly)
+	for i, key := range destOnly {
+		expected[i] = equals("rm %v%v", dst, key)
+	}
+	assertLines(t, result.Stdout(), expected, sortInput(true))
+
+	assert.Assert(t, ensureS3Object(s3client, dstbucket, "keep.txt", "S: this file is in both"))
+
+	for _, key := range destOnly {
+		err := ensureS3Object(s3client, dstbucket, key, "D: only in destination")
+		assertError(t, err, errS3NoSuchKey)
+	}
+}

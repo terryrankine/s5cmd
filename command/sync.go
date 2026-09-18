@@ -23,6 +23,11 @@ import (
 const (
 	extsortChannelBufferSize = 1_000
 	extsortChunkSize         = 100_000
+
+	// syncDeleteBatchSize is the number of destination-only URLs put into one
+	// generated rm command. It matches the number of keys S3 deletes in one
+	// DeleteObjects request, so the batches do not change how rm talks to S3.
+	syncDeleteBatchSize = 1_000
 )
 
 var syncHelpTemplate = `Name:
@@ -616,59 +621,7 @@ func (s Sync) planRun(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if s.delete {
-			// unfortunately we need to read them all!
-			// or rewrite generateCommand function?
-			dstURLs := make([]*url.URL, 0, extsortChunkSize)
-
-			for {
-				done := false
-				select {
-				case <-ctx.Done():
-					return
-				case d, ok := <-onlyDest:
-					if !ok {
-						done = true
-					} else {
-						// objects filtered out by --exclude/--include are not part
-						// of the sync, so they must not be deleted from the
-						// destination either.
-						if s.isFilteredOut(d.Path, dsturl.Prefix) {
-							continue
-						}
-						dstURLs = append(dstURLs, d)
-					}
-				}
-				if done {
-					break
-				}
-			}
-
-			// a listing error cancels the context. The objects seen until
-			// then are only part of the picture, so nothing may be deleted
-			// based on them.
-			if ctx.Err() != nil || len(dstURLs) == 0 {
-				return
-			}
-
-			// --exclude and --include are already applied above, relative to
-			// the destination prefix. Omit them from the generated rm command,
-			// which would match them against the full object key instead.
-			rmFlags := map[string]interface{}{
-				"raw":          true,
-				"exclude":      nil,
-				"include":      nil,
-				"exclude-from": nil,
-				"include-from": nil,
-			}
-
-			command, err := generateCommand(c, "rm", rmFlags, dstURLs...)
-			if err != nil {
-				printDebug(s.op, err, dstURLs...)
-				return
-			}
-			fmt.Fprintln(w, command)
-		} else {
+		if !s.delete {
 			// we only need to consume them from the channel so that rest of the objects
 			// can be sent to channel.
 			for {
@@ -679,6 +632,64 @@ func (s Sync) planRun(
 					if !ok {
 						return
 					}
+				}
+			}
+		}
+
+		// --exclude and --include are applied below, relative to the
+		// destination prefix. Omit them from the generated rm command,
+		// which would match them against the full object key instead.
+		rmFlags := map[string]interface{}{
+			"raw":          true,
+			"exclude":      nil,
+			"include":      nil,
+			"exclude-from": nil,
+			"include-from": nil,
+		}
+
+		// The objects to delete are written as rm commands of at most
+		// syncDeleteBatchSize URLs each, as they arrive. Collecting them all
+		// into one rm command kept every destination-only URL in memory, and
+		// rm then started a goroutine per URL: a sync --delete of a few
+		// hundred thousand objects was killed for running out of memory.
+		//
+		// Nothing is deleted from a partial listing: the sorted streams that
+		// feed onlyDest start only after both listings have completed, and
+		// a listing error cancels ctx before that. An error while reading
+		// the sorted objects back cancels ctx as soon as it is seen, which
+		// stops the batches still to come and the commands already running.
+		batch := make([]*url.URL, 0, syncDeleteBatchSize)
+		flush := func() {
+			defer func() { batch = batch[:0] }()
+			if len(batch) == 0 || ctx.Err() != nil {
+				return
+			}
+			command, err := generateCommand(c, "rm", rmFlags, batch...)
+			if err != nil {
+				printDebug(s.op, err, batch...)
+				return
+			}
+			fmt.Fprintln(w, command)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case d, ok := <-onlyDest:
+				if !ok {
+					flush()
+					return
+				}
+				// objects filtered out by --exclude/--include are not part
+				// of the sync, so they must not be deleted from the
+				// destination either.
+				if s.isFilteredOut(d.Path, dsturl.Prefix) {
+					continue
+				}
+				batch = append(batch, d)
+				if len(batch) == syncDeleteBatchSize {
+					flush()
 				}
 			}
 		}

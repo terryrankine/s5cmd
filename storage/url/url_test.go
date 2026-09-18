@@ -45,11 +45,12 @@ func TestHasWild(t *testing.T) {
 
 func TestNew(t *testing.T) {
 	tests := []struct {
-		name         string
-		object       string
-		want         *URL
-		wantFilterRe string
-		wantErr      bool
+		name            string
+		object          string
+		want            *URL
+		wantFilterRe    string
+		wantMatchPrefix bool
+		wantErr         bool
 	}{
 		{
 			name:    "error_if_does_not_have_bucket",
@@ -71,7 +72,7 @@ func TestNew(t *testing.T) {
 				Prefix:    "key",
 				Delimiter: "/",
 			},
-			wantFilterRe: regexp.MustCompile(strutil.AddNewLineFlag(`^key.*$`)).String(),
+			wantMatchPrefix: true,
 		},
 		{
 			name:   "url_with_no_wildcard_end_with_slash",
@@ -83,7 +84,7 @@ func TestNew(t *testing.T) {
 				Prefix:    "key/",
 				Delimiter: "/",
 			},
-			wantFilterRe: regexp.MustCompile(strutil.AddNewLineFlag(`^key/.*$`)).String(),
+			wantMatchPrefix: true,
 		},
 		{
 			name:   "url_with_wildcard",
@@ -110,10 +111,23 @@ func TestNew(t *testing.T) {
 				t.Errorf("test case %q: URL mismatch (-want +got):\n%v", tc.name, diff)
 
 			}
+			if tc.wantErr {
+				return
+			}
 			if tc.wantFilterRe != "" {
+				if got.filterRegex == nil {
+					t.Fatalf("test case %q: URL.filterRegex is nil, want %q", tc.name, tc.wantFilterRe)
+				}
 				if diff := cmp.Diff(tc.wantFilterRe, got.filterRegex.String()); diff != "" {
 					t.Errorf("test case %q: URL.filterRegex mismatch (-want +got):\n%v", tc.name, diff)
 				}
+			} else if got.filterRegex != nil {
+				// a plain key must not compile a regexp: one per listed
+				// object is what made large syncs run out of memory.
+				t.Errorf("test case %q: URL.filterRegex = %q, want none", tc.name, got.filterRegex)
+			}
+			if got.matchPrefix != tc.wantMatchPrefix {
+				t.Errorf("test case %q: URL.matchPrefix = %v, want %v", tc.name, got.matchPrefix, tc.wantMatchPrefix)
 			}
 		})
 	}
@@ -241,7 +255,7 @@ func TestURLSetPrefixAndFilter(t *testing.T) {
 				Prefix:      "a/b_c/d/e",
 				Delimiter:   "/",
 				filter:      "",
-				filterRegex: regexp.MustCompile(strutil.AddNewLineFlag("^a/b_c/d/e.*$")),
+				matchPrefix: true,
 			},
 		},
 	}

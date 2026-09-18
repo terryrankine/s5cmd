@@ -24,9 +24,6 @@ const (
 
 	// s3Separator is the path separator for s3 URLs
 	s3Separator string = "/"
-
-	// matchAllRe is the regex to match everything
-	matchAllRe string = ".*"
 )
 
 type urlType int
@@ -51,8 +48,16 @@ type URL struct {
 
 	relativePath string
 	filter       string
-	filterRegex  *regexp.Regexp
-	raw          bool
+	// filterRegex matches object keys against a wildcard path. It is only
+	// compiled when the path has a wildcard: a compiled regexp costs a few
+	// kilobytes, and every listed object carries its own URL, so compiling
+	// one per plain key made a sync of a million objects need gigabytes.
+	filterRegex *regexp.Regexp
+	// matchPrefix is set when the path has no wildcard: Match then only
+	// requires the key to start with Prefix, which is what the regexp
+	// ^<prefix>.*$ used to check.
+	matchPrefix bool
+	raw         bool
 }
 
 type Option func(u *URL)
@@ -266,8 +271,7 @@ func (u *URL) remoteURL() string {
 // operations.
 //
 // It converts wildcard strings to regex format
-// and pre-compiles it for later usage. It is default to
-// ".*" to match every key on S3.
+// and pre-compiles it for later usage.
 //
 // filter is the part that comes after the wildcard string.
 // prefix is the part that comes before the wildcard string.
@@ -280,7 +284,8 @@ func (u *URL) remoteURL() string {
 //	regex: ^a/b/test./c/.*?\\.tsv$
 //	delimiter: ""
 //
-// It prepares delimiter, prefix and regex for regular strings.
+// It prepares delimiter and prefix for regular strings; Match then only
+// checks that a key starts with the prefix, no regex is compiled.
 // These are used in S3 listing operations.
 // See: https://docs.aws.amazon.com/AmazonS3/latest/dev/ListingKeysHierarchy.html
 //
@@ -289,26 +294,23 @@ func (u *URL) remoteURL() string {
 //	key: a/b/c
 //	prefix: a/b/c
 //	filter: ""
-//	regex: ^a/b/c.*$
 //	delimiter: "/"
 func (u *URL) setPrefixAndFilter() error {
 	if u.raw {
 		return nil
 	}
 
-	if loc := strings.IndexAny(u.Path, globCharacters); loc < 0 {
+	loc := strings.IndexAny(u.Path, globCharacters)
+	if loc < 0 {
 		u.Delimiter = s3Separator
 		u.Prefix = u.Path
-	} else {
-		u.Prefix = u.Path[:loc]
-		u.filter = u.Path[loc:]
+		u.matchPrefix = true
+		return nil
 	}
+	u.Prefix = u.Path[:loc]
+	u.filter = u.Path[loc:]
 
-	filterRegex := matchAllRe
-	if u.filter != "" {
-		filterRegex = strutil.WildCardToRegexp(u.filter)
-	}
-	filterRegex = strutil.QuoteMeta(u.Prefix) + filterRegex
+	filterRegex := strutil.QuoteMeta(u.Prefix) + strutil.WildCardToRegexp(u.filter)
 	filterRegex = strutil.MatchFromStartToEnd(filterRegex)
 	filterRegex = strutil.AddNewLineFlag(filterRegex)
 	r, err := regexp.Compile(filterRegex)
@@ -334,6 +336,7 @@ func (u *URL) Clone() *URL {
 		relativePath: u.relativePath,
 		filter:       u.filter,
 		filterRegex:  u.filterRegex,
+		matchPrefix:  u.matchPrefix,
 		raw:          u.raw,
 	}
 }
@@ -374,24 +377,23 @@ func (u *URL) SetRelative(base *URL) {
 
 // Match reports whether if given key matches with the object.
 func (u *URL) Match(key string) bool {
-	if u.filterRegex == nil {
-		return false
-	}
-
-	if !u.filterRegex.MatchString(key) {
-		return false
-	}
-
-	isBatch := u.filter != ""
-	if isBatch {
-		v := parseBatch(u.Prefix, key)
-		u.relativePath = v
+	switch {
+	case u.filterRegex != nil:
+		if !u.filterRegex.MatchString(key) {
+			return false
+		}
+		u.relativePath = parseBatch(u.Prefix, key)
 		return true
+	case u.matchPrefix:
+		if !strings.HasPrefix(key, u.Prefix) {
+			return false
+		}
+		u.relativePath = parseNonBatch(u.Prefix, key)
+		return true
+	default:
+		// a raw URL, or one not built by New: nothing to match against.
+		return false
 	}
-
-	v := parseNonBatch(u.Prefix, key)
-	u.relativePath = v
-	return true
 }
 
 // String is the fmt.Stringer implementation of URL.

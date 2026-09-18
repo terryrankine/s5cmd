@@ -4,11 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/google/go-cmp/cmp"
+	"github.com/kballard/go-shellquote"
+	"github.com/urfave/cli/v2"
 
 	"github.com/peak/s5cmd/v2/storage"
+	"github.com/peak/s5cmd/v2/storage/url"
 )
 
 func TestIsListingError(t *testing.T) {
@@ -122,6 +128,98 @@ func TestSyncErrors(t *testing.T) {
 			}
 			if !errors.Is(got, first) {
 				t.Errorf("err() = %v does not wrap the first error", got)
+			}
+		})
+	}
+}
+
+// TestSyncPlanRunDeleteBatches checks that the destination-only objects are
+// written as rm commands of at most syncDeleteBatchSize URLs each, as they
+// arrive, instead of one rm command holding every URL: that command, and
+// the goroutine rm starts per URL, is what made a large sync --delete run
+// out of memory (upstream peak/s5cmd#745).
+func TestSyncPlanRunDeleteBatches(t *testing.T) {
+	t.Parallel()
+
+	const n = 2*syncDeleteBatchSize + 1
+
+	tests := []struct {
+		name      string
+		cancel    bool
+		wantLines int
+	}{
+		{name: "batches", wantLines: 3},
+		// a cancelled sync deletes nothing, not even the batch it holds.
+		{name: "cancelled", cancel: true, wantLines: 0},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := Sync{op: "sync", delete: true}
+			dsturl := mustNewURL(t, "s3://bucket/prefix/")
+
+			onlySource := make(chan *url.URL)
+			common := make(chan *ObjectPair)
+			close(onlySource)
+			close(common)
+
+			var want []string
+			onlyDest := make(chan *url.URL, n)
+			for i := 0; i < n; i++ {
+				u := mustNewURL(t, fmt.Sprintf("s3://bucket/prefix/obj-%05d", i))
+				want = append(want, u.String())
+				onlyDest <- u
+			}
+			close(onlyDest)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancel {
+				cancel()
+			}
+
+			set := flagSet(t, "sync", NewSyncCommandFlags())
+			cliCtx := cli.NewContext(app, set, nil)
+
+			pr, pw := io.Pipe()
+			go s.planRun(ctx, cliCtx, onlySource, onlyDest, common, dsturl, NewStrategy(false), pw, true)
+
+			out, err := io.ReadAll(pr)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+			if len(out) == 0 {
+				lines = nil
+			}
+			if len(lines) != tc.wantLines {
+				t.Fatalf("got %d command lines, want %d:\n%s", len(lines), tc.wantLines, out)
+			}
+
+			var got []string
+			for _, line := range lines {
+				fields, err := shellquote.Split(line)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(fields) < 2 || fields[0] != "rm" || fields[1] != "--raw=true" {
+					t.Fatalf("unexpected command %q", line)
+				}
+				urls := fields[2:]
+				if len(urls) > syncDeleteBatchSize {
+					t.Errorf("rm command has %d urls, want at most %d", len(urls), syncDeleteBatchSize)
+				}
+				got = append(got, urls...)
+			}
+			if tc.cancel {
+				return
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("deleted urls (-want +got):\n%v", diff)
 			}
 		})
 	}
