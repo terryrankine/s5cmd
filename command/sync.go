@@ -17,7 +17,6 @@ import (
 	errorpkg "github.com/peak/s5cmd/v2/error"
 	"github.com/peak/s5cmd/v2/log"
 	"github.com/peak/s5cmd/v2/log/stat"
-	"github.com/peak/s5cmd/v2/parallel"
 	"github.com/peak/s5cmd/v2/storage"
 	"github.com/peak/s5cmd/v2/storage/url"
 )
@@ -141,12 +140,51 @@ type Sync struct {
 	// s3 options
 	storageOpts storage.Options
 
-	followSymlinks bool
-	storageClass   storage.StorageClass
-	raw            bool
+	followSymlinks        bool
+	storageClass          storage.StorageClass
+	raw                   bool
+	forceGlacierTransfer  bool
+	ignoreGlacierWarnings bool
 
 	srcRegion string
 	dstRegion string
+
+	// errs collects the errors reported while listing and planning. Run
+	// sets it and folds it into its result.
+	errs *syncErrors
+}
+
+// syncErrors records the errors sync reports while it lists objects and
+// plans commands. Those steps run in goroutines that print as they go and
+// cannot return an error, so without this record a printed ERROR could
+// still end in exit code 0.
+type syncErrors struct {
+	mu    sync.Mutex
+	count int
+	first error
+}
+
+func (e *syncErrors) add(err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.first == nil {
+		e.first = err
+	}
+	e.count++
+}
+
+// err summarises the recorded errors, or returns nil if there were none.
+func (e *syncErrors) err() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	switch e.count {
+	case 0:
+		return nil
+	case 1:
+		return e.first
+	default:
+		return fmt.Errorf("%w (and %d more errors)", e.first, e.count-1)
+	}
 }
 
 // NewSync creates Sync from cli.Context
@@ -165,9 +203,11 @@ func NewSync(c *cli.Context) Sync {
 		include:     c.StringSlice("include"),
 
 		// flags
-		followSymlinks: !c.Bool("no-follow-symlinks"),
-		storageClass:   storage.StorageClass(c.String("storage-class")),
-		raw:            c.Bool("raw"),
+		followSymlinks:        !c.Bool("no-follow-symlinks"),
+		storageClass:          storage.StorageClass(c.String("storage-class")),
+		raw:                   c.Bool("raw"),
+		forceGlacierTransfer:  c.Bool("force-glacier-transfer"),
+		ignoreGlacierWarnings: c.Bool("ignore-glacier-warnings"),
 		// region settings
 		srcRegion:   c.String("source-region"),
 		dstRegion:   c.String("destination-region"),
@@ -203,6 +243,8 @@ func (s Sync) Run(c *cli.Context) error {
 	ctx, cancel := context.WithCancel(c.Context)
 	defer cancel()
 
+	s.errs = &syncErrors{}
+
 	sourceObjects, destObjects, err := s.getSourceAndDestinationObjects(ctx, cancel, srcurl, dsturl)
 	if err != nil {
 		printError(s.fullCommand, s.op, err)
@@ -229,35 +271,28 @@ func (s Sync) Run(c *cli.Context) error {
 	sourceObjects = nil
 	destObjects = nil
 
-	waiter := parallel.NewWaiter()
-	var (
-		merrorWaiter error
-		errDoneCh    = make(chan struct{})
-	)
-
-	go func() {
-		defer close(errDoneCh)
-		for err := range waiter.Err() {
-			if strings.Contains(err.Error(), "too many open files") {
-				fmt.Println(strings.TrimSpace(fdlimitWarning))
-				printError(s.fullCommand, s.op, err)
-				merrorWaiter = multierror.Append(merrorWaiter, err)
-				cancel()
-				continue
-			}
-			printError(s.fullCommand, s.op, err)
-			merrorWaiter = multierror.Append(merrorWaiter, err)
-		}
-	}()
-
 	strategy := NewStrategy(s.sizeOnly) // create comparison strategy.
 	pipeReader, pipeWriter := io.Pipe() // create a reader, writer pipe to pass commands to run
 
 	// Create commands in background.
 	go s.planRun(ctx, c, onlySource, onlyDest, commonObjects, dsturl, strategy, pipeWriter, isBatch)
 
+	// The generated cp/rm commands report their own failures through Run's
+	// result. Add the errors the listing and planning goroutines printed;
+	// unless the run was cancelled, they all finished before the command
+	// pipe was closed.
 	err = NewRun(c, pipeReader).Run(ctx)
-	return multierror.Append(err, merrorWaiter).ErrorOrNil()
+	return multierror.Append(err, s.errs.err()).ErrorOrNil()
+}
+
+// reportError prints err and records it so that Run exits non-zero.
+func (s Sync) reportError(err error) {
+	// printError does not print cancelation errors; do not record them either.
+	if errorpkg.IsCancelation(err) {
+		return
+	}
+	printError(s.fullCommand, s.op, err)
+	s.errs.add(err)
 }
 
 // compareObjects compares source and destination objects. It assumes that
@@ -407,7 +442,7 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 
 		// read and print the external sort errors
 		for err := range srcErrCh {
-			printError(s.fullCommand, s.op, err)
+			s.reportError(err)
 		}
 	}()
 
@@ -448,7 +483,7 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 
 		// read and print the external sort errors
 		for err := range dstErrCh {
-			printError(s.fullCommand, s.op, err)
+			s.reportError(err)
 		}
 	}()
 
@@ -491,7 +526,11 @@ func (s Sync) planRun(
 				if !ok {
 					return
 				}
-				curDestURL := generateDestinationURL(srcurl, dsturl, isBatch)
+				curDestURL, err := generateDestinationURL(srcurl, dsturl, isBatch)
+				if err != nil {
+					s.reportError(err)
+					continue
+				}
 				command, err := generateCommand(c, "cp", defaultFlags, srcurl, curDestURL)
 				if err != nil {
 					printDebug(s.op, err, srcurl, curDestURL)
@@ -607,7 +646,7 @@ func (s Sync) planRun(
 
 // generateDestinationURL generates destination url for given
 // source url if it would have been in destination.
-func generateDestinationURL(srcurl, dsturl *url.URL, isBatch bool) *url.URL {
+func generateDestinationURL(srcurl, dsturl *url.URL, isBatch bool) (*url.URL, error) {
 	objname := srcurl.Base()
 	if isBatch {
 		objname = srcurl.Relative()
@@ -615,13 +654,13 @@ func generateDestinationURL(srcurl, dsturl *url.URL, isBatch bool) *url.URL {
 
 	if dsturl.IsRemote() {
 		if dsturl.IsPrefix() || dsturl.IsBucket() {
-			return dsturl.Join(objname)
+			return dsturl.Join(objname), nil
 		}
-		return dsturl.Clone()
+		return dsturl.Clone(), nil
 
 	}
 
-	return dsturl.Join(objname)
+	return dsturl.JoinInside(objname)
 }
 
 // shouldSkipObject checks is object should be skipped.
@@ -632,15 +671,17 @@ func (s Sync) shouldSkipSrcObject(object *storage.Object, verbose bool) bool {
 
 	if err := object.Err; err != nil {
 		if verbose {
-			printError(s.fullCommand, s.op, err)
+			s.reportError(err)
 		}
 		return true
 	}
 
-	if object.StorageClass.IsGlacier() {
-		if verbose {
+	// Same rules as cp: Glacier objects are skipped and reported as errors
+	// unless the caller forces the transfer or asks to ignore the warnings.
+	if object.StorageClass.IsGlacier() && !s.forceGlacierTransfer {
+		if verbose && !s.ignoreGlacierWarnings {
 			err := fmt.Errorf("object '%v' is on Glacier storage", object)
-			printError(s.fullCommand, s.op, err)
+			s.reportError(err)
 		}
 		return true
 	}
@@ -654,7 +695,7 @@ func (s Sync) shouldSkipDstObject(object *storage.Object, verbose bool) bool {
 
 	if err := object.Err; err != nil {
 		if verbose {
-			printError(s.fullCommand, s.op, err)
+			s.reportError(err)
 		}
 		return true
 	}
