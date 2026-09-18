@@ -89,6 +89,10 @@ func NewListCommand() *cli.Command {
 				Name:  "exclude",
 				Usage: "exclude objects with given pattern",
 			},
+			&cli.StringSliceFlag{
+				Name:  "exclude-from",
+				Usage: "exclude objects with the patterns read from given file, one per line",
+			},
 			&cli.BoolFlag{
 				Name:  "all-versions",
 				Usage: "list all versions of object(s)",
@@ -128,6 +132,13 @@ func NewListCommand() *cli.Command {
 				printError(fullCommand, c.Command.Name, err)
 				return err
 			}
+
+			exclude, err := patternsFromContext(c, "exclude")
+			if err != nil {
+				printError(fullCommand, c.Command.Name, err)
+				return err
+			}
+
 			return List{
 				src:         srcurl,
 				op:          c.Command.Name,
@@ -136,7 +147,7 @@ func NewListCommand() *cli.Command {
 				showEtag:         c.Bool("etag"),
 				humanize:         c.Bool("humanize"),
 				showStorageClass: c.Bool("storage-class"),
-				exclude:          c.StringSlice("exclude"),
+				exclude:          exclude,
 				showFullPath:     c.Bool("show-fullpath"),
 
 				storageOpts: NewStorageOpts(c),

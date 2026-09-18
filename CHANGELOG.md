@@ -1,5 +1,23 @@
 # Changelog
-## Unreleased
+## v2.4.1 - 18 Sep 2026
+
+#### Security
+- Fixed a path traversal in `cp` and `sync` downloads: an object key containing `..` segments (e.g. `data/../../../.bashrc`) resolved outside the destination directory and could overwrite any file the user can write. Such objects are now rejected with an error, the rest of the run continues, and the exit code is non-zero. Remote destinations, `--flatten` and single-object copies were never affected. (upstream [#872](https://github.com/peak/s5cmd/issues/872))
+
+#### Behaviour changes
+- `sync` now exits non-zero whenever it prints an `ERROR`, and stops when listing the source or destination fails instead of continuing with a partial listing — with `--delete` a partial source listing used to delete destination objects that still existed in the source. `sync` also honours `--ignore-glacier-warnings` and `--force-glacier-transfer` (accepted before, silently ignored); without them a Glacier object in the source is an error, as it is for `cp`. (upstream [#869](https://github.com/peak/s5cmd/issues/869), [#852](https://github.com/peak/s5cmd/issues/852), [#824](https://github.com/peak/s5cmd/issues/824))
+- Downloads are created with mode `0666` before umask instead of a forced `chmod 0644`, so `umask 002` yields `0664` and filesystems that reject `chmod` (drvfs, some CIFS/sshfs mounts) work. (upstream [#744](https://github.com/peak/s5cmd/issues/744), [#826](https://github.com/peak/s5cmd/issues/826))
+- Usage errors are printed to stderr with a `See 's5cmd <cmd> --help'` hint; the full help text is no longer dumped on error. (upstream [#804](https://github.com/peak/s5cmd/issues/804))
+
+#### Features
+- Added `--exclude-from` and `--include-from` to `cp`, `mv`, `rm` and `sync`, and `--exclude-from` to `ls`, `du` and `select`: read wildcard patterns from a file, one per line; blank lines and `#` comments are ignored. (upstream [#868](https://github.com/peak/s5cmd/issues/868))
+- `rm --raw` can delete directory-marker objects (keys ending in `/`) such as those created by the console or Cyberduck. (upstream [#707](https://github.com/peak/s5cmd/issues/707), [#834](https://github.com/peak/s5cmd/issues/834))
+
+#### Improvements
+- `rm` now runs its DeleteObjects batches on the shared worker pool, so the number of in-flight delete requests follows `--numworkers` (default 256) instead of a hardcoded limit of 10. Local filesystem removals run in parallel too. (upstream [#870](https://github.com/peak/s5cmd/issues/870), [#844](https://github.com/peak/s5cmd/issues/844))
+- `ls` prints an object whose key exactly matches the requested path relative to the same base as its siblings, instead of the full key. (upstream [#755](https://github.com/peak/s5cmd/issues/755))
+- `--log-progress` uses the same byte units as `ls -H`/`du -H` and prints nothing when no object was transferred.
+- Release image base bumped to Alpine 3.22; binaries built with Go 1.27.
 
 #### Bugfixes
 - Fixed `--dry-run` downloads closing stdin: the placeholder file handle wrapped fd 0, so `s5cmd --dry-run run < commands` hung after the first download. Regression in v2.4.0. (upstream [#879](https://github.com/peak/s5cmd/pull/879))
@@ -7,6 +25,16 @@
 - Fixed `--log-file` silently falling back to stdout when the file cannot be opened; the command now fails with the reason.
 - Fixed `--no-clobber`, `--if-size-differ` and `--if-source-newer` sending the destination HEAD to the source region when `--destination-region` differs. ([#839](https://github.com/peak/s5cmd/issues/839), same as upstream [#862](https://github.com/peak/s5cmd/pull/862))
 - Fixed multipart copy (>5 GiB) ignoring `--metadata-directive REPLACE` and dropping the source SSE-KMS key.
+- Fixed `sync` exiting 0 after printing an `ERROR`: errors from listing (`no object found`, Glacier objects, sort failures) and from planning are now reflected in the exit code, and `sync` honours `--ignore-glacier-warnings` and `--force-glacier-transfer` like `cp` does. (upstream [#869](https://github.com/peak/s5cmd/issues/869), [#824](https://github.com/peak/s5cmd/issues/824))
+- Fixed `sync` carrying on after a failed listing. Errors while listing the source or destination were ignored unless their code was on a short list, so a `BucketRegionError` (bucket in another region than `AWS_REGION`) made `sync --delete` treat the bucket as empty: it re-uploaded everything, deleted nothing and exited 0. A failed source listing could even delete files still present. Any listing error now stops the sync with exit code 1, and the `rm` that `sync --delete` runs honours `--destination-region`. (upstream [#852](https://github.com/peak/s5cmd/issues/852))
+- Fixed usage errors after a command name (e.g. `s5cmd ls --json ...`, where `--json` is a global flag) printing "Incorrect Usage" and the full help text to stdout; they now go to stderr with a pointer to the command's `--help`, so redirected stdout stays clean. The "too many open files" warning also moved to stderr. (upstream [#804](https://github.com/peak/s5cmd/issues/804))
+- Fixed `--stat` counting `rm` once per command rather than once per object, so `sync --delete --stat` reported 1 removal when many files were deleted. (upstream [#649](https://github.com/peak/s5cmd/issues/649))
+- Fixed `sync --exclude`/`--include` not applying prefix-relative patterns such as `sub/*` on the copy side: `sub/new.log` was still uploaded. Patterns are now applied once, relative to the source prefix, and no longer re-matched by the generated `cp`.
+
+#### Testing and CI
+- Windows: tests that need symlinks skip when the privilege is missing instead of failing.
+- Lint tools moved to `tools/go.mod` so `qa` runs on current Go without raising the module's Go floor; CI tests Go 1.24 (floor) and 1.27 (current).
+- Fixed two flakes in the e2e suite: a fake-S3 bolt backend that served object bytes from an mmap after the read transaction ended (NUL-filled downloads), and a `createBucket` that failed on the SDK's retry of a slow request.
 
 ## v2.4.0 - 18 Mar 2026
 

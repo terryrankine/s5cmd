@@ -160,6 +160,31 @@ func TestGenerateCommand(t *testing.T) {
 			expectedCommand: `rm --raw='true' s3://bucket/key1 s3://bucket/key2`,
 		},
 		{
+			name: "string-slice-default-flag-is-repeated-and-replaces-context-value",
+			cmd:  "cp",
+			flags: []cli.Flag{
+				&cli.StringSliceFlag{
+					Name:  "exclude",
+					Value: cli.NewStringSlice("*.txt"),
+				},
+				&cli.StringSliceFlag{
+					Name:  "exclude-from",
+					Value: cli.NewStringSlice("patterns.txt"),
+				},
+			},
+			defaultFlags: map[string]interface{}{
+				"raw":          true,
+				"exclude":      []string{"*.txt", "*.log"},
+				"include":      []string(nil),
+				"exclude-from": nil,
+			},
+			urls: []*url.URL{
+				mustNewURL(t, "s3://bucket/key1"),
+				mustNewURL(t, "s3://bucket/key2"),
+			},
+			expectedCommand: `cp --exclude='*.log' --exclude='*.txt' --raw='true' s3://bucket/key1 s3://bucket/key2`,
+		},
+		{
 			name:  "command-with-multiple-args",
 			cmd:   "rm",
 			flags: []cli.Flag{},

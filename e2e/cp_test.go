@@ -145,6 +145,39 @@ func TestCopySingleS3ObjectToLocal(t *testing.T) {
 	}
 }
 
+// cp s3://bucket/a/b/c/foo dir/
+//
+// The exact object is copied as dir/foo; siblings sharing the key as a prefix
+// (a/b/c/foo/bar, a/b/c/foobar) are left alone.
+func TestCopySingleNestedS3ObjectWithSiblingsToLocal(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const content = "this is a file content"
+
+	putFile(t, s3client, bucket, "a/b/c/foo", content)
+	putFile(t, s3client, bucket, "a/b/c/foo/bar", content)
+	putFile(t, s3client, bucket, "a/b/c/foobar", content)
+
+	src := fmt.Sprintf("s3://%v/a/b/c/foo", bucket)
+	cmd := s5cmd("cp", src, "dir/")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals("cp %v dir/foo", src),
+	})
+
+	// assert local filesystem
+	expected := fs.Expected(t, fs.WithDir("dir", fs.WithFile("foo", content, fs.WithMode(0644))))
+	assert.Assert(t, fs.Equal(cmd.Dir, expected))
+}
+
 // --json cp s3://bucket/object .
 func TestCopySingleS3ObjectToLocalJSON(t *testing.T) {
 	t.Parallel()
@@ -223,6 +256,31 @@ func TestCopySingleS3ObjectToLocalWithDestinationWildcard(t *testing.T) {
 
 	// assert s3 object
 	assert.Assert(t, ensureS3Object(s3client, bucket, filename, content))
+}
+
+// cp s3://bucket/missing.txt .
+func TestCopyMissingS3ObjectToLocalLeavesNoTempFile(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const filename = "missing.txt"
+
+	cmd := s5cmd("cp", "s3://"+bucket+"/"+filename, ".")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: contains(`ERROR "cp s3://%v/%v %v": NoSuchKey:`, bucket, filename, filename),
+	})
+
+	// the temporary download file must be removed on failure
+	expected := fs.Expected(t)
+	assert.Assert(t, fs.Equal(cmd.Dir, expected))
 }
 
 // cp s3://bucket/prefix/ dir/
@@ -307,6 +365,52 @@ func TestCopyMultipleFlatS3ObjectsToLocal(t *testing.T) {
 	for filename, content := range filesToContent {
 		assert.Assert(t, ensureS3Object(s3client, bucket, filename, content))
 	}
+}
+
+// cp s3://bucket/* dir/  (object key contains "..")
+//
+// Object keys are arbitrary strings. A key such as "data/../../escape.txt"
+// must never resolve outside the destination directory.
+func TestCopyS3ObjectsToLocalWithPathTraversalKey(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const (
+		safeKey      = "data/ok.txt"
+		traversalKey = "data/../../escape.txt"
+	)
+	putFile(t, s3client, bucket, safeKey, "ok")
+	putFile(t, s3client, bucket, traversalKey, "pwned")
+	assert.Assert(t, ensureS3Object(s3client, bucket, traversalKey, "pwned"))
+
+	workdir := fs.NewDir(t, "somedir", fs.WithDir("dest"))
+	defer workdir.Remove()
+
+	cmd := s5cmd("cp", "s3://"+bucket+"/*", "dest/")
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp s3://%v/data/ok.txt dest/data/ok.txt`, bucket),
+	})
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: contains(`escapes destination`),
+	})
+
+	// nothing written outside dest/, the safe object copied normally.
+	expected := fs.Expected(t,
+		fs.WithDir("dest",
+			fs.WithDir("data",
+				fs.WithFile("ok.txt", "ok"),
+			),
+		),
+	)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
 }
 
 // cp --flatten s3://bucket/*.txt dir/
@@ -2715,6 +2819,125 @@ func TestCopyLocalFileToS3WithSameFilenameWithNoClobber(t *testing.T) {
 	assert.Assert(t, ensureS3Object(s3client, bucket, filename, content))
 }
 
+// cp -n dir/sub s3://bucket/prefix/ (all objects exist)
+//
+// Regression test for upstream peak/s5cmd#718, which reported that a local
+// directory given without a trailing slash was re-uploaded as "file.jpeg.jpeg"
+// instead of being skipped. Not reproduced; the test pins the correct behaviour.
+func TestCopyLocalDirectoryWithoutSlashToS3WithNoClobberAllExist(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const (
+		content    = "this is the content"
+		newContent = content + "\n"
+	)
+
+	// objects already exist at the destination.
+	existing := map[string]string{
+		"uploads/images/2022/01/file01.jpeg": content,
+		"uploads/images/2022/01/file02.jpeg": content,
+	}
+	for key, body := range existing {
+		putFile(t, s3client, bucket, key, body)
+	}
+
+	// local files are modified, they must still be skipped.
+	folderLayout := []fs.PathOp{
+		fs.WithDir("2022",
+			fs.WithDir("01",
+				fs.WithFile("file01.jpeg", newContent),
+				fs.WithFile("file02.jpeg", newContent),
+			),
+		),
+	}
+
+	workdir := fs.NewDir(t, t.Name(), folderLayout...)
+	defer workdir.Remove()
+
+	src := "2022/01"
+	dst := fmt.Sprintf("s3://%v/uploads/images/2022/", bucket)
+
+	cmd := s5cmd("--log=debug", "cp", "-n", "--acl", "public-read", src, dst)
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`DEBUG "cp %v/file01.jpeg %v01/file01.jpeg": object already exists`, src, dst),
+		1: equals(`DEBUG "cp %v/file02.jpeg %v01/file02.jpeg": object already exists`, src, dst),
+	}, sortInput(true))
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	// assert local filesystem
+	expected := fs.Expected(t, folderLayout...)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+
+	// existing objects are untouched and nothing else was created.
+	for key, body := range existing {
+		assert.Assert(t, ensureS3Object(s3client, bucket, key, body))
+	}
+	assertS3Keys(t, s3client, bucket, existing)
+}
+
+// cp -n dir/sub s3://bucket/prefix/ (no objects exist)
+func TestCopyLocalDirectoryWithoutSlashToS3WithNoClobberNoneExist(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const content = "this is the content"
+
+	folderLayout := []fs.PathOp{
+		fs.WithDir("2022",
+			fs.WithDir("01",
+				fs.WithFile("file01.jpeg", content),
+				fs.WithFile("file02.jpeg", content),
+			),
+		),
+	}
+
+	workdir := fs.NewDir(t, t.Name(), folderLayout...)
+	defer workdir.Remove()
+
+	src := "2022/01"
+	dst := fmt.Sprintf("s3://%v/uploads/images/2022/", bucket)
+
+	cmd := s5cmd("cp", "-n", src, dst)
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp %v/file01.jpeg %v01/file01.jpeg`, src, dst),
+		1: equals(`cp %v/file02.jpeg %v01/file02.jpeg`, src, dst),
+	}, sortInput(true))
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	// assert local filesystem
+	expected := fs.Expected(t, folderLayout...)
+	assert.Assert(t, fs.Equal(workdir.Path(), expected))
+
+	// assert s3: uploaded to the right keys, and only those keys.
+	expectedS3Content := map[string]string{
+		"uploads/images/2022/01/file01.jpeg": content,
+		"uploads/images/2022/01/file02.jpeg": content,
+	}
+	for key, body := range expectedS3Content {
+		assert.Assert(t, ensureS3Object(s3client, bucket, key, body))
+	}
+	assertS3Keys(t, s3client, bucket, expectedS3Content)
+}
+
 // cp -n file s3://bucket
 func TestCopyLocalFileToS3WithNoClobber(t *testing.T) {
 	t.Parallel()
@@ -3104,6 +3327,7 @@ func TestCopyMultipleLocalNestedFilesToS3(t *testing.T) {
 // cp --no-follow-symlinks my_link s3://bucket/prefix/
 func TestCopyLinkToASingleFileWithFollowSymlinkDisabled(t *testing.T) {
 	t.Parallel()
+	requireSymlinks(t)
 
 	s3client, s5cmd := setup(t)
 
@@ -3136,6 +3360,7 @@ func TestCopyLinkToASingleFileWithFollowSymlinkDisabled(t *testing.T) {
 // cp * s3://bucket/prefix/
 func TestCopyWithFollowSymlink(t *testing.T) {
 	t.Parallel()
+	requireSymlinks(t)
 
 	s3client, s5cmd := setup(t)
 
@@ -3178,6 +3403,7 @@ func TestCopyWithFollowSymlink(t *testing.T) {
 
 func TestCopyErrorWhenGivenObjectIsNotFoundUsingWildcard(t *testing.T) {
 	t.Parallel()
+	requireSymlinks(t)
 
 	s3client, s5cmd := setup(t)
 
@@ -3209,6 +3435,7 @@ func TestCopyErrorWhenGivenObjectIsNotFoundUsingWildcard(t *testing.T) {
 // cp --no-follow-symlinks * s3://bucket/prefix/
 func TestCopyWithNoFollowSymlink(t *testing.T) {
 	t.Parallel()
+	requireSymlinks(t)
 
 	s3client, s5cmd := setup(t)
 
@@ -4599,6 +4826,92 @@ func TestCopyS3ObjectsWithIncludeExcludeFilter2(t *testing.T) {
 	}
 	// assert local filesystem
 	expected := fs.Expected(t, expectedFileSystem...)
+	assert.Assert(t, fs.Equal(cmd.Dir, expected))
+}
+
+// cp --exclude-from patterns.txt s3://bucket/* .
+func TestCopyS3ObjectsWithExcludeFromFile(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const (
+		patternFile = "patterns.txt"
+		// blank lines, comments and surrounding whitespace are ignored.
+		patternFileContent = "# excluded patterns\n\n  *.py  \n\t\nfile*\n"
+		fileContent        = "content"
+	)
+
+	files := [...]string{
+		"file1.txt",
+		"file2.txt",
+		"file.py",
+		"a.py",
+		"src/file.py",
+		"readme.md",
+	}
+
+	for _, filename := range files {
+		putFile(t, s3client, bucket, filename, fileContent)
+	}
+
+	workdir := fs.NewDir(t, t.Name(), fs.WithFile(patternFile, patternFileContent))
+	defer workdir.Remove()
+
+	srcpath := fmt.Sprintf("s3://%s", bucket)
+
+	cmd := s5cmd("cp", "--exclude-from", workdir.Join(patternFile), srcpath+"/*", ".")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals("cp %v/readme.md %s", srcpath, files[5]),
+	})
+
+	// assert s3
+	for _, f := range files {
+		assert.Assert(t, ensureS3Object(s3client, bucket, f, fileContent))
+	}
+
+	// assert local filesystem
+	expected := fs.Expected(t, fs.WithFile("readme.md", fileContent))
+	assert.Assert(t, fs.Equal(cmd.Dir, expected))
+}
+
+// cp --exclude-from missing.txt s3://bucket/* .
+func TestCopyS3ObjectsWithMissingExcludeFromFile(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const fileContent = "content"
+
+	putFile(t, s3client, bucket, "file1.txt", fileContent)
+
+	workdir := fs.NewDir(t, t.Name())
+	defer workdir.Remove()
+
+	patternFile := filepath.ToSlash(workdir.Join("missing.txt"))
+	srcpath := fmt.Sprintf("s3://%s", bucket)
+
+	cmd := s5cmd("cp", "--exclude-from", patternFile, srcpath+"/*", ".")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: contains(`ERROR "cp --exclude-from=%v %v/* .": --exclude-from: open %v:`, patternFile, srcpath, patternFile),
+	})
+
+	// nothing should be copied
+	expected := fs.Expected(t)
 	assert.Assert(t, fs.Equal(cmd.Dir, expected))
 }
 

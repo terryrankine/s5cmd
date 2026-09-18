@@ -284,6 +284,14 @@ func (db *Backend) GetObject(bucketName, objectName string, rangeRequest *gofake
 			return fmt.Errorf("gofakes3: could not unmarshal object at %q/%q: %v", bucketName, objectName, err)
 		}
 
+		// v points into bolt's mmap and is only valid for the life of the
+		// transaction. bson does not copy []byte fields, so Contents and Hash
+		// would alias the mmap after View returns. The body is streamed to
+		// the client later; a concurrent write transaction can reuse the
+		// page by then, and the client reads zeros. Copy what escapes.
+		t.Contents = append([]byte(nil), t.Contents...)
+		t.Hash = append([]byte(nil), t.Hash...)
+
 		return nil
 	})
 

@@ -354,6 +354,78 @@ func TestListS3ObjectsAndFoldersWithPrefix(t *testing.T) {
 	}, alignment(true))
 }
 
+// ls bucket/prefix/object
+//
+// The object whose key equals the requested path must be listed relative to
+// the same base as its siblings, not with its full key.
+// See: https://github.com/peak/s5cmd/issues/755
+func TestListS3ObjectMatchingPrefixExactlyWithSiblings(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+	putFile(t, s3client, bucket, "a/b/c/foo", "content")
+	putFile(t, s3client, bucket, "a/b/c/foo/bar", "content")
+	putFile(t, s3client, bucket, "a/b/c/foobar", "content")
+
+	cmd := s5cmd("ls", "s3://"+bucket+"/a/b/c/foo")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: suffix("DIR foo/"),
+		1: suffix("7 foo"),
+		2: suffix("7 foobar"),
+	}, alignment(true))
+}
+
+// ls bucket/prefix/object
+func TestListSingleNestedS3Object(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+	putFile(t, s3client, bucket, "a/b/c/foo", "content")
+
+	cmd := s5cmd("ls", "s3://"+bucket+"/a/b/c/foo")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: suffix("7 foo"),
+	})
+}
+
+// ls --show-fullpath bucket/prefix/object
+func TestListSingleNestedS3ObjectWithFullpath(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+	putFile(t, s3client, bucket, "a/b/c/foo", "content")
+	putFile(t, s3client, bucket, "a/b/c/foo/bar", "content")
+	putFile(t, s3client, bucket, "a/b/c/foobar", "content")
+
+	cmd := s5cmd("ls", "--show-fullpath", "s3://"+bucket+"/a/b/c/foo")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals("s3://%v/a/b/c/foo/", bucket),
+		1: equals("s3://%v/a/b/c/foo", bucket),
+		2: equals("s3://%v/a/b/c/foobar", bucket),
+	})
+}
+
 // ls bucket/*/object*.ext
 func TestListNonexistingS3ObjectInGivenPrefix(t *testing.T) {
 	t.Parallel()

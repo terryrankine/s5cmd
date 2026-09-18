@@ -2,12 +2,15 @@ package progressbar
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cheggaaa/pb/v3"
+
+	"github.com/peak/s5cmd/v2/strutil"
 )
 
 type ProgressBar interface {
@@ -93,6 +96,7 @@ type LogProgressBar struct {
 	mu               sync.Mutex
 	lastUpdate       time.Time
 	updateInterval   time.Duration
+	out              io.Writer
 }
 
 var _ ProgressBar = (*LogProgressBar)(nil)
@@ -100,6 +104,7 @@ var _ ProgressBar = (*LogProgressBar)(nil)
 func NewLogProgressBar() *LogProgressBar {
 	return &LogProgressBar{
 		updateInterval: 2 * time.Second,
+		out:            os.Stderr,
 	}
 }
 
@@ -108,9 +113,14 @@ func (lp *LogProgressBar) Start() {
 	lp.lastUpdate = lp.startTime
 }
 
+// Finish prints the final progress line and a completion message. It prints
+// nothing if no object was transferred, so an idle run stays quiet.
 func (lp *LogProgressBar) Finish() {
+	if atomic.LoadInt64(&lp.completedObjects) == 0 {
+		return
+	}
 	lp.print()
-	fmt.Fprintln(os.Stderr, "Transfer complete")
+	fmt.Fprintln(lp.out, "Transfer complete")
 }
 
 func (lp *LogProgressBar) IncrementCompletedObjects() {
@@ -170,28 +180,15 @@ func (lp *LogProgressBar) print() {
 		eta = "calculating..."
 	}
 
-	fmt.Fprintf(os.Stderr, "%.1f%% - %s/%s @ %s/s - ETA: %s (%d/%d files)\n",
+	fmt.Fprintf(lp.out, "%.1f%% - %s/%s @ %s/s - ETA: %s (%d/%d files)\n",
 		percent,
-		formatBytes(completed),
-		formatBytes(total),
-		formatBytes(int64(speed)),
+		strutil.HumanizeBytes(completed),
+		strutil.HumanizeBytes(total),
+		strutil.HumanizeBytes(int64(speed)),
 		eta,
 		completedObjs,
 		totalObjs,
 	)
-}
-
-func formatBytes(bytes int64) string {
-	const unit = 1000
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
-	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "kMGTPE"[exp])
 }
 
 func formatDuration(d time.Duration) string {

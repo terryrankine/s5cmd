@@ -1,9 +1,16 @@
 package storage
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/peak/s5cmd/v2/parallel"
+	"github.com/peak/s5cmd/v2/storage/url"
 )
 
 func TestFilesystemImplementsStorageInterface(t *testing.T) {
@@ -78,5 +85,147 @@ func TestFilesystemCreateDryRun(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected no files in temp dir during dry run, got %d", len(entries))
+	}
+}
+
+func TestFilesystemCreateTempNaming(t *testing.T) {
+	t.Parallel()
+
+	fs := &Filesystem{}
+	tmpDir := t.TempDir()
+
+	testcases := []struct {
+		name    string
+		pattern string
+		prefix  string
+		suffix  string
+	}{
+		{name: "no wildcard", pattern: "file.txt", prefix: "file.txt", suffix: ""},
+		{name: "wildcard in middle", pattern: "file-*.txt", prefix: "file-", suffix: ".txt"},
+		{name: "wildcard at end", pattern: "file.txt.*", prefix: "file.txt.", suffix: ""},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := fs.CreateTemp(tmpDir, tc.pattern)
+			if err != nil {
+				t.Fatalf("CreateTemp() returned error: %v", err)
+			}
+			defer f.Close()
+
+			if got := filepath.Dir(f.Name()); got != tmpDir {
+				t.Fatalf("expected file in %q, got %q", tmpDir, got)
+			}
+
+			base := filepath.Base(f.Name())
+			if !strings.HasPrefix(base, tc.prefix) || !strings.HasSuffix(base, tc.suffix) {
+				t.Fatalf("expected name %q<random>%q, got %q", tc.prefix, tc.suffix, base)
+			}
+
+			random := strings.TrimSuffix(strings.TrimPrefix(base, tc.prefix), tc.suffix)
+			if _, err := strconv.ParseUint(random, 10, 32); err != nil {
+				t.Fatalf("expected a decimal random part in %q, got %q", base, random)
+			}
+
+			// the file must be usable for both reading and writing
+			if _, err := f.Write([]byte("content")); err != nil {
+				t.Fatalf("Write() returned error: %v", err)
+			}
+			if _, err := f.ReadAt(make([]byte, 1), 0); err != nil {
+				t.Fatalf("ReadAt() returned error: %v", err)
+			}
+		})
+	}
+
+	t.Run("pattern with separator", func(t *testing.T) {
+		_, err := fs.CreateTemp(tmpDir, "dir"+string(os.PathSeparator)+"file")
+		if err == nil {
+			t.Fatal("expected error for pattern containing a path separator")
+		}
+	})
+
+	t.Run("unique names", func(t *testing.T) {
+		seen := make(map[string]struct{})
+		for i := 0; i < 20; i++ {
+			f, err := fs.CreateTemp(tmpDir, "unique-*")
+			if err != nil {
+				t.Fatalf("CreateTemp() returned error: %v", err)
+			}
+			f.Close()
+			if _, ok := seen[f.Name()]; ok {
+				t.Fatalf("CreateTemp() returned the same name twice: %q", f.Name())
+			}
+			seen[f.Name()] = struct{}{}
+		}
+	})
+}
+
+// TestFilesystemMultiDelete checks that every file sent to MultiDelete is
+// removed and reported exactly once, including failures, when the deletes
+// run on the parallel manager.
+func TestFilesystemMultiDelete(t *testing.T) {
+	const numFiles = 50
+
+	parallel.Init(4)
+	defer parallel.Close()
+
+	fs := &Filesystem{}
+	tmpDir := t.TempDir()
+
+	var paths []string
+	for i := 0; i < numFiles; i++ {
+		path := filepath.Join(tmpDir, fmt.Sprintf("file-%02d.txt", i))
+		if err := os.WriteFile(path, []byte("content"), 0644); err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+		paths = append(paths, path)
+	}
+	missing := filepath.Join(tmpDir, "missing.txt")
+	paths = append(paths, missing)
+
+	urlch := make(chan *url.URL)
+	go func() {
+		defer close(urlch)
+		for _, path := range paths {
+			u, err := url.New(path)
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+			urlch <- u
+		}
+	}()
+
+	seen := make(map[string]int)
+	for obj := range fs.MultiDelete(context.Background(), urlch) {
+		path := filepath.Clean(obj.URL.Absolute())
+		seen[path]++
+
+		if path == missing {
+			if obj.Err == nil {
+				t.Errorf("expected an error for %q", path)
+			}
+			continue
+		}
+		if obj.Err != nil {
+			t.Errorf("unexpected error for %q: %v", path, obj.Err)
+		}
+	}
+
+	if len(seen) != len(paths) {
+		t.Errorf("expected %d results, got %d", len(paths), len(seen))
+	}
+	for _, path := range paths {
+		if seen[path] != 1 {
+			t.Errorf("expected %q to be reported once, got %d", path, seen[path])
+		}
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir failed: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected all files to be removed, %d left", len(entries))
 	}
 }

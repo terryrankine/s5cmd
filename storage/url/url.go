@@ -201,6 +201,32 @@ func (u *URL) Dir() string {
 	return basefn(u.Path)
 }
 
+// JoinInside is Join for destinations that must contain the result. Object
+// keys are arbitrary strings and may hold ".." components; joined onto a
+// local directory they would resolve outside it, so an attacker who can
+// write one object to a bucket could write anywhere the downloading user
+// can. Remote URLs keep keys verbatim and are joined as is.
+func (u *URL) JoinInside(s string) (*URL, error) {
+	clone := u.Join(s)
+	if clone.IsRemote() {
+		return clone, nil
+	}
+
+	base := path.Clean(u.Path)
+	target := clone.Path // already cleaned by path.Join
+
+	var escapes bool
+	if base == "." {
+		escapes = target == ".." || strings.HasPrefix(target, "../")
+	} else {
+		escapes = target != base && !strings.HasPrefix(target, strings.TrimSuffix(base, "/")+"/")
+	}
+	if escapes {
+		return nil, fmt.Errorf("object key %q escapes destination %q", s, u.Path)
+	}
+	return clone, nil
+}
+
 // Join joins string and returns new URL.
 func (u *URL) Join(s string) *URL {
 	if runtime.GOOS == "windows" {
@@ -437,8 +463,20 @@ func parseBatch(prefix string, key string) string {
 //	key: a/b/c/d
 //	prefix: a/b
 //	output: c/
+//
+// A key that equals a non-directory prefix (an exact object match) is
+// rendered relative to the parent of the prefix, the same base its
+// siblings use:
+//
+//	key: a/b/c/foo
+//	prefix: a/b/c/foo
+//	output: foo
 func parseNonBatch(prefix string, key string) string {
-	if key == prefix || !strings.HasPrefix(key, prefix) {
+	if !strings.HasPrefix(key, prefix) {
+		return key
+	}
+	if key == prefix && strings.HasSuffix(key, s3Separator) {
+		// exact match of a directory-marker object; keep the key as is.
 		return key
 	}
 	parsedKey := strings.TrimSuffix(key, s3Separator)

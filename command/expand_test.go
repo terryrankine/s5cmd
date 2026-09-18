@@ -2,9 +2,13 @@ package command
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
+	"syscall"
 	"testing"
 
 	"go.uber.org/mock/gomock"
@@ -175,7 +179,23 @@ func TestExpandSources(t *testing.T) {
 	}
 }
 
+// requireSymlinks skips the test when the process cannot create symlinks.
+// On Windows that needs Developer Mode or SeCreateSymbolicLinkPrivilege;
+// without either, os.Symlink fails with ERROR_PRIVILEGE_NOT_HELD (1314).
+// Any other error is left for the test itself to report.
+func requireSymlinks(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+	err := os.Symlink(filepath.Join(dir, "target"), filepath.Join(dir, "link"))
+	if err != nil && runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314)) {
+		t.Skipf("symlinks need Developer Mode or SeCreateSymbolicLinkPrivilege: %v", err)
+	}
+}
+
 func TestExpandSource_Follow_Link_To_Single_File(t *testing.T) {
+	requireSymlinks(t)
+
 	folderLayout := []fs.PathOp{
 		fs.WithDir(
 			"a",
@@ -205,6 +225,8 @@ func TestExpandSource_Follow_Link_To_Single_File(t *testing.T) {
 }
 
 func TestExpandSource_Do_Not_Follow_Link_To_Single_File(t *testing.T) {
+	requireSymlinks(t)
+
 	folderLayout := []fs.PathOp{
 		fs.WithDir(
 			"a",
@@ -232,6 +254,8 @@ func TestExpandSource_Do_Not_Follow_Link_To_Single_File(t *testing.T) {
 }
 
 func TestExpandSource_Follow_Link_To_Directory(t *testing.T) {
+	requireSymlinks(t)
+
 	folderLayout := []fs.PathOp{
 		fs.WithDir(
 			"a",
@@ -267,6 +291,8 @@ func TestExpandSource_Follow_Link_To_Directory(t *testing.T) {
 }
 
 func TestExpandSource_Do_Not_Follow_Link_To_Directory(t *testing.T) {
+	requireSymlinks(t)
+
 	folderLayout := []fs.PathOp{
 		fs.WithDir(
 			"a",
@@ -298,6 +324,8 @@ func TestExpandSource_Do_Not_Follow_Link_To_Directory(t *testing.T) {
 }
 
 func TestExpandSource_Do_Not_Follow_Symlinks(t *testing.T) {
+	requireSymlinks(t)
+
 	ctx := context.Background()
 	fileContent := "CAFEBABE"
 	folderLayout := []fs.PathOp{

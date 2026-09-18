@@ -8,6 +8,7 @@ import (
 
 func TestMain(m *testing.M) {
 	flag.Parse()
+	setUmask()
 
 	cleanup := goBuildS5cmd()
 	code := m.Run()

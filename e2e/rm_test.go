@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/igungor/gofakes3"
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/fs"
 	"gotest.tools/v3/icmd"
@@ -789,6 +790,76 @@ func TestRemoveS3PrefixRawFlag(t *testing.T) {
 	}
 }
 
+// rm --raw s3://bucket/dir/
+//
+// A directory marker is a zero-byte object whose key ends with "/". With
+// --raw the trailing slash is part of the exact key, not a prefix, so only
+// the marker is deleted and objects under it are left alone.
+func TestRemoveS3DirectoryMarkerRawFlag(t *testing.T) {
+	t.Parallel()
+
+	var backend gofakes3.Backend
+	s3client, s5cmd := setup(t, withBackend(&backend))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const (
+		marker   = "dir/"
+		filename = "dir/file.txt"
+		content  = "this is a test file"
+	)
+
+	putDirectoryMarker(t, s3client, backend, bucket, marker)
+	putFile(t, s3client, bucket, filename, content)
+
+	cmd := s5cmd("rm", "--raw", "s3://"+bucket+"/"+marker)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`rm s3://%v/%v`, bucket, marker),
+	})
+
+	// the marker is gone
+	assert.Assert(t, !s3ObjectExists(t, s3client, backend, bucket, marker))
+
+	// the object under the marker is untouched
+	assert.Assert(t, ensureS3Object(s3client, bucket, filename, content))
+}
+
+// rm s3://bucket/dir/
+func TestRemoveS3DirectoryMarkerWithoutRawFlag(t *testing.T) {
+	t.Parallel()
+
+	var backend gofakes3.Backend
+	s3client, s5cmd := setup(t, withBackend(&backend))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const marker = "dir/"
+
+	putDirectoryMarker(t, s3client, backend, bucket, marker)
+
+	src := "s3://" + bucket + "/" + marker
+
+	cmd := s5cmd("rm", src)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: equals(`ERROR "rm %v": s3 bucket/prefix cannot be used for delete operations (forgot wildcard character?)`, src),
+	})
+
+	// the marker is still there
+	assert.Assert(t, s3ObjectExists(t, s3client, backend, bucket, marker))
+}
+
 // rm --exclude "*.txt" s3://bucket/*
 func TestRemoveMultipleS3ObjectsWithExcludeFilter(t *testing.T) {
 	t.Parallel()
@@ -1452,4 +1523,131 @@ func TestRemoveS3ObjectsWithIncludeExcludeFilter2(t *testing.T) {
 	for _, f := range filesKept {
 		assert.Assert(t, ensureS3Object(s3client, bucket, f, fileContent))
 	}
+}
+
+// rm --include "*.py" --include-from patterns.txt s3://bucket/*
+func TestRemoveS3ObjectsWithIncludeFromFile(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const (
+		includePattern     = "*.py"
+		patternFile        = "patterns.txt"
+		patternFileContent = "# patterns from file are appended to --include\n\n  *.go\n"
+		fileContent        = "content"
+	)
+
+	files := [...]string{
+		"file1.py",
+		"file2.go",
+		"file.txt",
+		"data.txt",
+		"src/app.py",
+	}
+	filesKept := [...]string{
+		"file.txt",
+		"data.txt",
+	}
+
+	for _, filename := range files {
+		putFile(t, s3client, bucket, filename, fileContent)
+	}
+
+	workdir := fs.NewDir(t, t.Name(), fs.WithFile(patternFile, patternFileContent))
+	defer workdir.Remove()
+
+	srcpath := fmt.Sprintf("s3://%s", bucket)
+
+	cmd := s5cmd("rm", "--include", includePattern, "--include-from", workdir.Join(patternFile), srcpath+"/*")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals("rm %v/%s", srcpath, files[0]),
+		1: equals("rm %v/%s", srcpath, files[1]),
+		2: equals("rm %v/%s", srcpath, files[4]),
+	}, sortInput(true))
+
+	// assert s3
+	for _, f := range filesKept {
+		assert.Assert(t, ensureS3Object(s3client, bucket, f, fileContent))
+	}
+}
+
+// --stat rm s3://bucket/*
+//
+// One stat entry is recorded for every object removed, not one for the
+// command (upstream peak/s5cmd#649).
+func TestRemoveMultipleS3ObjectsWithStat(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	filesToContent := map[string]string{
+		"testfile1.txt":          "this is a test file 1",
+		"readme.md":              "this is a readme file",
+		"filename-with-hypen.gz": "file has hypen in its name",
+		"another_test_file.txt":  "yet another txt file. yatf.",
+	}
+
+	for filename, content := range filesToContent {
+		putFile(t, s3client, bucket, filename, content)
+	}
+
+	cmd := s5cmd("--stat", "rm", "s3://"+bucket+"/*")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	output, stats := splitStatTable(t, result.Stdout())
+
+	assertLines(t, output, map[int]compareFunc{
+		0: equals(`rm s3://%v/another_test_file.txt`, bucket),
+		1: equals(`rm s3://%v/filename-with-hypen.gz`, bucket),
+		2: equals(`rm s3://%v/readme.md`, bucket),
+		3: equals(`rm s3://%v/testfile1.txt`, bucket),
+	}, sortInput(true))
+
+	assert.DeepEqual(t, stats, map[string]string{"rm": "4 0 4"})
+
+	// assert s3 objects
+	for filename, content := range filesToContent {
+		err := ensureS3Object(s3client, bucket, filename, content)
+		assertError(t, err, errS3NoSuchKey)
+	}
+}
+
+// --stat rm nonexistentfile
+//
+// A run that removes nothing records a single error, not an error plus a
+// command entry.
+func TestRemoveNonexistingLocalFileWithStat(t *testing.T) {
+	t.Parallel()
+
+	_, s5cmd := setup(t)
+
+	cmd := s5cmd("--stat", "rm", "nonexistentfile")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: equals(`ERROR "rm nonexistentfile": no object found`),
+	})
+
+	output, stats := splitStatTable(t, result.Stdout())
+
+	assertLines(t, output, map[int]compareFunc{})
+
+	assert.DeepEqual(t, stats, map[string]string{"rm": "1 1 0"})
 }

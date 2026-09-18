@@ -3,14 +3,17 @@ package storage
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/karrick/godirwalk"
 	"github.com/termie/go-shutil"
 
+	"github.com/peak/s5cmd/v2/parallel"
 	"github.com/peak/s5cmd/v2/storage/url"
 )
 
@@ -80,8 +83,7 @@ func (f *Filesystem) expandGlob(ctx context.Context, src *url.URL, followSymlink
 			return
 		}
 		if len(matchedFiles) == 0 {
-			err := fmt.Errorf("no match found for %q", src)
-			sendError(ctx, err, ch)
+			sendError(ctx, &ErrNoMatchFound{Pattern: src.Absolute()}, ch)
 			return
 		}
 
@@ -189,20 +191,39 @@ func (f *Filesystem) Delete(ctx context.Context, url *url.URL) error {
 	return os.Remove(url.Absolute())
 }
 
-// MultiDelete deletes all files returned from given channel.
+// MultiDelete deletes all files returned from given channel. Files are
+// removed in parallel on the global parallel manager, bounded by
+// '-numworkers'.
 func (f *Filesystem) MultiDelete(ctx context.Context, urlch <-chan *url.URL) <-chan *Object {
 	resultch := make(chan *Object)
 	go func() {
 		defer close(resultch)
 
-		for url := range urlch {
-			err := f.Delete(ctx, url)
-			obj := &Object{
-				URL: url,
-				Err: err,
+		waiter := parallel.NewWaiter()
+
+		// every result, including failures, is sent on resultch, so tasks
+		// never return an error. Drain the waiter anyway so that a task can
+		// never block on the error channel.
+		errDoneCh := make(chan struct{})
+		go func() {
+			defer close(errDoneCh)
+			for range waiter.Err() {
 			}
-			resultch <- obj
+		}()
+
+		for url := range urlch {
+			url := url
+			parallel.Run(func() error {
+				resultch <- &Object{
+					URL: url,
+					Err: f.Delete(ctx, url),
+				}
+				return nil
+			}, waiter)
 		}
+
+		waiter.Wait()
+		<-errDoneCh
 	}()
 	return resultch
 }
@@ -234,19 +255,65 @@ func (f *Filesystem) Open(path string) (*os.File, error) {
 	return file, nil
 }
 
-// CreateTemp creates a new temporary file
+// CreateTemp creates a new temporary file in dir and opens it for reading
+// and writing. The name is generated like os.CreateTemp: a random string is
+// appended to pattern, or replaces the last "*" in it.
+//
+// Unlike os.CreateTemp, which creates the file 0600, the file is created
+// with mode 0666 before umask, the same as os.Create. The final mode is then
+// decided by the kernel from the caller's umask, and no chmod is needed
+// afterwards. That keeps downloads working on filesystems that reject chmod
+// (drvfs, some CIFS and sshfs mounts).
 func (f *Filesystem) CreateTemp(dir, pattern string) (*os.File, error) {
 	if f.dryRun {
 		return os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	}
 
-	file, err := os.CreateTemp(dir, pattern)
-	if err != nil {
-		return nil, err
+	if dir == "" {
+		dir = os.TempDir()
 	}
 
-	err = file.Chmod(0644)
-	return file, err
+	prefix, suffix, err := prefixAndSuffix(pattern)
+	if err != nil {
+		return nil, &os.PathError{Op: "createtemp", Path: pattern, Err: err}
+	}
+	if !os.IsPathSeparator(dir[len(dir)-1]) {
+		dir += string(os.PathSeparator)
+	}
+	prefix = dir + prefix
+
+	for try := 0; ; try++ {
+		name := prefix + nextRandom() + suffix
+		file, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
+		if os.IsExist(err) {
+			if try < 10000 {
+				continue
+			}
+			return nil, &os.PathError{Op: "createtemp", Path: prefix + "*" + suffix, Err: os.ErrExist}
+		}
+		return file, err
+	}
+}
+
+var errPatternHasSeparator = errors.New("pattern contains path separator")
+
+// prefixAndSuffix splits pattern at its last "*", mirroring the unexported
+// helper of the same name in the os package.
+func prefixAndSuffix(pattern string) (prefix, suffix string, err error) {
+	for i := 0; i < len(pattern); i++ {
+		if os.IsPathSeparator(pattern[i]) {
+			return "", "", errPatternHasSeparator
+		}
+	}
+	if pos := strings.LastIndexByte(pattern, '*'); pos != -1 {
+		return pattern[:pos], pattern[pos+1:], nil
+	}
+	return pattern, "", nil
+}
+
+// nextRandom returns a random decimal string, as os.CreateTemp does.
+func nextRandom() string {
+	return strconv.FormatUint(uint64(rand.Uint32()), 10)
 }
 
 // Rename a file

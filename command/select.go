@@ -71,6 +71,12 @@ func buildSelect(c *cli.Context, inputFormat string, inputStructure *string) (cm
 		outputFormat = inputFormat
 	}
 
+	exclude, err := patternsFromContext(c, "exclude")
+	if err != nil {
+		printError(fullCommand, c.Command.Name, err)
+		return nil, err
+	}
+
 	cmd = &Select{
 		src:         src,
 		op:          c.Command.Name,
@@ -80,7 +86,7 @@ func buildSelect(c *cli.Context, inputFormat string, inputStructure *string) (cm
 		outputFormat:          outputFormat,
 		query:                 c.String("query"),
 		compressionType:       c.String("compression"),
-		exclude:               c.StringSlice("exclude"),
+		exclude:               exclude,
 		forceGlacierTransfer:  c.Bool("force-glacier-transfer"),
 		ignoreGlacierWarnings: c.Bool("ignore-glacier-warnings"),
 
@@ -108,6 +114,10 @@ func NewSelectCommand() *cli.Command {
 		&cli.StringSliceFlag{
 			Name:  "exclude",
 			Usage: "exclude objects with given pattern",
+		},
+		&cli.StringSliceFlag{
+			Name:  "exclude-from",
+			Usage: "exclude objects with the patterns read from given file, one per line",
 		},
 		&cli.BoolFlag{
 			Name:  "force-glacier-transfer",

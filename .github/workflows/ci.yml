@@ -69,10 +69,10 @@ jobs:
     strategy:
       matrix:
         go-version:
-          # staticcheck is pinned in go.mod (internal/tools); v0.6.x is the
-          # last line that keeps the module at go 1.24 and it understands
-          # Go 1.24-1.25 only. Newer staticcheck raises the module minimum.
-          - 1.25.x
+          # Lint on current Go only. staticcheck (tools/go.mod) is built and
+          # run with the latest Go; it lints the code as the `go` line in
+          # go.mod targets it, so a second run on the minimum adds nothing.
+          - 1.27.x  # current
         os:
           - ubuntu
 
