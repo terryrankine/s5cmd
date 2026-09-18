@@ -126,17 +126,20 @@ Loop per item: worktree → reproducing test first → fix → line-by-line revi
 
 | # | Item | State |
 |---|---|---|
-| 1 | Quarterly upstream triage (workflow; AI routine needs GitHub connected to the Claude account) | PR #33 |
-| 2 | `Waiter` collects errors internally; per-error handler replaces the drain goroutines | this PR |
-| 3 | `--exit-on-error` → stop on first cp/rm failure | next |
-| 4 | Fork Homebrew tap | |
-| 5 | #745 OOM on large sync | |
-| 6 | #751 sync listing incomplete with UTF-8 keys | |
-| 7 | #720 strange sync behaviour | |
-| 8 | #845 cp timezone | |
-| 9 | #517 keys ending in `/` | |
-| 10 | #810 "no match found" for local destination | |
-| 11 | #800 / #749 symlink download errors | |
+| 1 | Quarterly upstream triage (workflow; AI routine needs GitHub connected to the Claude account) | merged #33 |
+| 2 | `Waiter` collects errors internally; per-error handler replaces the drain goroutines | merged #34 |
+| 3 | `--exit-on-error` → stop on first cp/rm failure | merged #35 |
+| 4 | Fork Homebrew tap | merged #37 |
+| 5 | #745 OOM on large sync | merged #43 |
+| 6 | #751 sync listing incomplete with UTF-8 keys | merged #42 |
+| 7 | #720 strange sync behaviour | merged #41 |
+| 8 | #845 cp timezone | not a bug, tests merged #39 |
+| 9 | #517 keys ending in `/` | merged #38 |
+| 10 | #810 "no match found" for local destination | merged #40 |
+| 11 | #800 / #749 symlink download errors | merged #44 |
+| 11b | property-based tests; parallel manager under `-race` | merged #45, #47 |
+| 11c | edge-case probe: `--delete` on an empty source, Glacier copies (DD-8, DD-9) | merged #46 |
+| — | **v2.5.0** | this PR |
 | 12+ | features: #532/#350 preserve timestamps/permissions, #433 bandwidth limit, #528 resume, #561 hash sync (PR #799), #700 per-side endpoints, #808 SSE-C, #803 tagging, #697 dry-run marker, #796 nothing-to-sync line | v2.6.0 |
 
 "Not a bug, with tests" is an acceptable outcome for 5–11 (two of the earlier batch were).
