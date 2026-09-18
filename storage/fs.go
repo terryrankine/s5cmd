@@ -267,7 +267,7 @@ func (f *Filesystem) CreateTemp(dir, pattern string) (*os.File, error) {
 	for try := 0; ; try++ {
 		name := prefix + nextRandom() + suffix
 		file, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
-		if os.IsExist(err) {
+		if errors.Is(err, os.ErrExist) {
 			if try < 10000 {
 				continue
 			}
