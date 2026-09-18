@@ -140,3 +140,5 @@ Loop per item: worktree → reproducing test first → fix → line-by-line revi
 | 12+ | features: #532/#350 preserve timestamps/permissions, #433 bandwidth limit, #528 resume, #561 hash sync (PR #799), #700 per-side endpoints, #808 SSE-C, #803 tagging, #697 dry-run marker, #796 nothing-to-sync line | v2.6.0 |
 
 "Not a bug, with tests" is an acceptable outcome for 5–11 (two of the earlier batch were).
+
+Product decisions made along the way are in [design-decisions.md](design-decisions.md); its "Open" section lists what probing found and nobody has decided yet.

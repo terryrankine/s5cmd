@@ -159,16 +159,19 @@ func TestSyncPlanRunDeleteBatches(t *testing.T) {
 	tests := []struct {
 		name       string
 		cancel     bool
+		srcListed  int
 		skippedSrc int
 		wantLines  int
 		wantErrs   int
 	}{
-		{name: "batches", wantLines: 3},
+		{name: "batches", srcListed: 1, wantLines: 3},
 		// a cancelled sync deletes nothing, not even the batch it holds.
-		{name: "cancelled", cancel: true, wantLines: 0},
+		{name: "cancelled", srcListed: 1, cancel: true, wantLines: 0},
 		// a source object skipped with an error is missing from the
 		// comparison, so nothing may be deleted (upstream peak/s5cmd#800).
-		{name: "skipped source", skippedSrc: 1, wantLines: 0, wantErrs: 1},
+		{name: "skipped source", srcListed: 1, skippedSrc: 1, wantLines: 0, wantErrs: 1},
+		// a source that matched nothing is a typo until proven otherwise.
+		{name: "empty source", srcListed: 0, wantLines: 0, wantErrs: 1},
 	}
 
 	for _, tc := range tests {
@@ -180,9 +183,12 @@ func TestSyncPlanRunDeleteBatches(t *testing.T) {
 			for i := 0; i < tc.skippedSrc; i++ {
 				s.errs.addSkippedSrc()
 			}
+			for i := 0; i < tc.srcListed; i++ {
+				s.errs.addSrcListed()
+			}
 			dsturl := mustNewURL(t, "s3://bucket/prefix/")
 
-			onlySource := make(chan *url.URL)
+			onlySource := make(chan *storage.Object)
 			common := make(chan *ObjectPair)
 			close(onlySource)
 			close(common)
@@ -223,7 +229,7 @@ func TestSyncPlanRunDeleteBatches(t *testing.T) {
 			if s.errs.count != tc.wantErrs {
 				t.Errorf("got %d reported errors, want %d: %v", s.errs.count, tc.wantErrs, s.errs.first)
 			}
-			if tc.skippedSrc > 0 {
+			if tc.skippedSrc > 0 || tc.srcListed == 0 {
 				return
 			}
 
