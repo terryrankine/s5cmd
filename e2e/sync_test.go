@@ -4181,6 +4181,12 @@ func TestSyncS3BucketToLocalWithDeleteAndStat(t *testing.T) {
 // generated cp line in two, which ended the run.
 func TestSyncLocalFolderWithAwkwardFileNamesToS3(t *testing.T) {
 	t.Parallel()
+
+	if runtime.GOOS == "darwin" {
+		// APFS refuses file names that are not valid UTF-8 ("illegal byte
+		// sequence"), so the Latin-1 name below cannot exist there.
+		t.Skip("macOS file systems reject non-UTF-8 file names")
+	}
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows file names are UTF-16: they cannot hold invalid UTF-8 or a newline")
 	}
