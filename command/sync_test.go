@@ -23,6 +23,7 @@ func TestIsListingError(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
+		url  *url.URL
 		want bool
 	}{
 		{
@@ -75,6 +76,18 @@ func TestIsListingError(t *testing.T) {
 			err:  fmt.Errorf("lstat dangling: no such file or directory"),
 			want: true,
 		},
+		{
+			name: "an error about one listed object is not a listing error",
+			err:  &storage.ErrGivenObjectNotFound{ObjectAbsPath: "dir/dangling"},
+			url:  mustNewURL(t, "dir/dangling"),
+			want: false,
+		},
+		{
+			name: "an unreadable directory leaves the listing incomplete",
+			err:  fmt.Errorf("open dir/locked: permission denied"),
+			url:  mustNewURL(t, "dir/locked/"),
+			want: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -82,7 +95,7 @@ func TestIsListingError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := isListingError(tc.err)
+			got := isListingError(&storage.Object{URL: tc.url, Err: tc.err})
 			if got != tc.want {
 				t.Errorf("isListingError(%v) = %v, want %v", tc.err, got, tc.want)
 			}
@@ -144,13 +157,18 @@ func TestSyncPlanRunDeleteBatches(t *testing.T) {
 	const n = 2*syncDeleteBatchSize + 1
 
 	tests := []struct {
-		name      string
-		cancel    bool
-		wantLines int
+		name       string
+		cancel     bool
+		skippedSrc int
+		wantLines  int
+		wantErrs   int
 	}{
 		{name: "batches", wantLines: 3},
 		// a cancelled sync deletes nothing, not even the batch it holds.
 		{name: "cancelled", cancel: true, wantLines: 0},
+		// a source object skipped with an error is missing from the
+		// comparison, so nothing may be deleted (upstream peak/s5cmd#800).
+		{name: "skipped source", skippedSrc: 1, wantLines: 0, wantErrs: 1},
 	}
 
 	for _, tc := range tests {
@@ -158,7 +176,10 @@ func TestSyncPlanRunDeleteBatches(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			s := Sync{op: "sync", delete: true}
+			s := Sync{op: "sync", delete: true, errs: &syncErrors{}}
+			for i := 0; i < tc.skippedSrc; i++ {
+				s.errs.addSkippedSrc()
+			}
 			dsturl := mustNewURL(t, "s3://bucket/prefix/")
 
 			onlySource := make(chan *url.URL)
@@ -198,6 +219,12 @@ func TestSyncPlanRunDeleteBatches(t *testing.T) {
 			}
 			if len(lines) != tc.wantLines {
 				t.Fatalf("got %d command lines, want %d:\n%s", len(lines), tc.wantLines, out)
+			}
+			if s.errs.count != tc.wantErrs {
+				t.Errorf("got %d reported errors, want %d: %v", s.errs.count, tc.wantErrs, s.errs.first)
+			}
+			if tc.skippedSrc > 0 {
+				return
 			}
 
 			var got []string
