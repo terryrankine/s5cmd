@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -80,8 +79,7 @@ func (f *Filesystem) expandGlob(ctx context.Context, src *url.URL, followSymlink
 			return
 		}
 		if len(matchedFiles) == 0 {
-			err := fmt.Errorf("no match found for %q", src)
-			sendError(ctx, err, ch)
+			sendError(ctx, &ErrNoMatchFound{Pattern: src.Absolute()}, ch)
 			return
 		}
 

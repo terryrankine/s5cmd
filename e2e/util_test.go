@@ -78,6 +78,9 @@ type setupOpts struct {
 	region      string
 	timeSource  gofakes3.TimeSource
 	enableProxy bool
+	// bucketRegion, if set, makes the fake server reject requests signed
+	// for another region like Amazon S3 does. See regionRedirect.
+	bucketRegion string
 }
 
 type option func(*setupOpts)
@@ -121,6 +124,16 @@ func withTimeSource(timeSource gofakes3.TimeSource) option {
 func withProxy() option {
 	return func(opts *setupOpts) {
 		opts.enableProxy = true
+	}
+}
+
+// withBucketRegion puts every bucket of the fake server in the given region.
+// The test's own S3 client signs for that region; s5cmd has to find it, via
+// a region flag or auto-detection, or its requests fail with a
+// BucketRegionError as they do against Amazon S3.
+func withBucketRegion(region string) option {
+	return func(opts *setupOpts) {
+		opts.bucketRegion = region
 	}
 }
 
@@ -171,6 +184,17 @@ func setup(t *testing.T, options ...option) (*s3.S3, func(...string) icmd.Cmd) {
 		region = opts.region
 	}
 
+	if region == "" && opts.bucketRegion != "" {
+		// the test client must sign for the region the fake server enforces.
+		region = opts.bucketRegion
+		if accessKeyID == "" {
+			accessKeyID = defaultAccessKeyID
+		}
+		if secretKey == "" {
+			secretKey = defaultSecretAccessKey
+		}
+	}
+
 	var cfg *credentialCfg
 
 	if region != "" || accessKeyID != "" || secretKey != "" {
@@ -214,7 +238,7 @@ func server(t *testing.T, testdir *fs.Dir, opts *setupOpts) string {
 		s3LogLevel = "info" // aws has no level other than 'debug'
 	}
 
-	endpoint := s3ServerEndpoint(t, testdir, s3LogLevel, opts.s3backend, opts.timeSource, opts.enableProxy)
+	endpoint := s3ServerEndpoint(t, testdir, s3LogLevel, opts.s3backend, opts.timeSource, opts.enableProxy, opts.bucketRegion)
 
 	return endpoint
 }

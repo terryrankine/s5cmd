@@ -2943,3 +2943,210 @@ func TestSyncS3ObjectsIntoAnotherBucketWithIncludeFilters(t *testing.T) {
 		assertError(t, err, errS3NoSuchKey)
 	}
 }
+
+// sync --delete ./dist s3://bucket/ (and the other ways to name the folder)
+//
+// Coverage for peak/s5cmd#852: a relative source folder, with or without a
+// trailing slash, or an absolute one. Objects that are not in the source
+// must be removed from the bucket in every case.
+func TestSyncLocalFolderToS3BucketWithDeleteSourceForms(t *testing.T) {
+	t.Parallel()
+
+	sources := []struct {
+		name string
+		src  func(workdir *fs.Dir) string
+		// prefix the objects get in the bucket: a folder given without a
+		// trailing slash is uploaded as a folder, like cp does.
+		prefix string
+	}{
+		{"relative", func(*fs.Dir) string { return "./dist" }, "dist/"},
+		{"relative-trailing-slash", func(*fs.Dir) string { return "dist/" }, ""},
+		{"absolute", func(w *fs.Dir) string { return filepath.ToSlash(w.Join("dist")) }, "dist/"},
+	}
+
+	for _, tc := range sources {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s3client, s5cmd := setup(t)
+
+			bucket := s3BucketFromTestName(t)
+			createBucket(t, s3client, bucket)
+
+			workdir := fs.NewDir(t, "workdir", fs.WithDir("dist",
+				fs.WithFile("index.html", "S: index"),
+				fs.WithDir("assets", fs.WithFile("app.js", "S: app")),
+			))
+			defer workdir.Remove()
+
+			// only in the bucket: must be deleted.
+			stale := map[string]string{
+				"stale.html":               "D: stale",
+				tc.prefix + "old.html":     "D: old",
+				tc.prefix + "assets/x.css": "D: x",
+			}
+			for key, content := range stale {
+				putFile(t, s3client, bucket, key, content)
+			}
+
+			src := tc.src(workdir)
+			dst := fmt.Sprintf("s3://%v/", bucket)
+
+			cmd := s5cmd("sync", "--delete", src, dst)
+			result := icmd.RunCmd(cmd, withWorkingDir(workdir))
+
+			result.Assert(t, icmd.Success)
+
+			assertLines(t, result.Stdout(), map[int]compareFunc{
+				0: suffix(`dist/assets/app.js %v%vassets/app.js`, dst, tc.prefix),
+				1: suffix(`dist/index.html %v%vindex.html`, dst, tc.prefix),
+				2: equals(`rm %v%vassets/x.css`, dst, tc.prefix),
+				3: equals(`rm %v%vold.html`, dst, tc.prefix),
+				4: equals(`rm %vstale.html`, dst),
+			}, sortInput(true))
+
+			// assert s3 objects
+			assert.Assert(t, ensureS3Object(s3client, bucket, tc.prefix+"index.html", "S: index"))
+			assert.Assert(t, ensureS3Object(s3client, bucket, tc.prefix+"assets/app.js", "S: app"))
+			for key, content := range stale {
+				err := ensureS3Object(s3client, bucket, key, content)
+				assertError(t, err, errS3NoSuchKey)
+			}
+		})
+	}
+}
+
+// sync --delete --destination-region eu-west-1 ./dist s3://bucket/
+//
+// The bucket is in eu-west-1 but the environment says us-east-1, as in
+// peak/s5cmd#852 (GitHub Actions). The generated rm command must remove the
+// objects from the bucket's region.
+func TestSyncLocalFolderToS3BucketInAnotherRegionWithDelete(t *testing.T) {
+	t.Parallel()
+
+	const bucketRegion = "eu-west-1"
+
+	s3client, s5cmd := setup(t, withBucketRegion(bucketRegion))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	workdir := fs.NewDir(t, "workdir", fs.WithDir("dist",
+		fs.WithFile("index.html", "S: index"),
+	))
+	defer workdir.Remove()
+
+	putFile(t, s3client, bucket, "dist/stale.html", "D: stale")
+
+	dst := fmt.Sprintf("s3://%v/", bucket)
+
+	cmd := s5cmd("sync", "--delete", "--destination-region", bucketRegion, "./dist", dst)
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir), withEnv("AWS_REGION", "us-east-1"))
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals(`cp dist/index.html %vdist/index.html`, dst),
+		1: equals(`rm %vdist/stale.html`, dst),
+	}, sortInput(true))
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{})
+
+	// assert s3 objects
+	assert.Assert(t, ensureS3Object(s3client, bucket, "dist/index.html", "S: index"))
+
+	err := ensureS3Object(s3client, bucket, "dist/stale.html", "D: stale")
+	assertError(t, err, errS3NoSuchKey)
+}
+
+// sync --delete ./dist s3://bucket/ (bucket in another region, no region flag)
+//
+// Listing the destination fails with a BucketRegionError. The sync must report
+// that and stop: it must not treat the bucket as empty, re-upload everything
+// and quietly skip the deletions, which is what peak/s5cmd#852 saw.
+func TestSyncLocalFolderToS3BucketInAnotherRegionFails(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t, withBucketRegion("eu-west-1"))
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	workdir := fs.NewDir(t, "workdir", fs.WithDir("dist",
+		fs.WithFile("index.html", "S: index"),
+	))
+	defer workdir.Remove()
+
+	putFile(t, s3client, bucket, "dist/stale.html", "D: stale")
+
+	dst := fmt.Sprintf("s3://%v/", bucket)
+
+	cmd := s5cmd("sync", "--delete", "./dist", dst)
+	result := icmd.RunCmd(cmd, withWorkingDir(workdir), withEnv("AWS_REGION", "us-east-1"))
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: contains(`ERROR "sync --delete=true ./dist %v": BucketRegionError: incorrect region`, dst),
+	}, strictLineCheck(false))
+
+	// nothing was deleted or uploaded.
+	assert.Assert(t, ensureS3Object(s3client, bucket, "dist/stale.html", "D: stale"))
+
+	err := ensureS3Object(s3client, bucket, "dist/index.html", "S: index")
+	assertError(t, err, errS3NoSuchKey)
+}
+
+// sync --delete folder/ s3://bucket/ (listing the folder fails part way)
+//
+// A dangling symlink aborts the directory walk, so the files after it are
+// never listed. The sync must stop instead of deleting their copies from the
+// bucket.
+func TestSyncLocalFolderWithDanglingSymlinkToS3BucketWithDelete(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs a privilege on windows")
+	}
+
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	folderLayout := []fs.PathOp{
+		fs.WithFile("a.txt", "S: a"),
+		fs.WithSymlink("m.txt", "does-not-exist"),
+		fs.WithFile("z.txt", "S: z"),
+	}
+
+	workdir := fs.NewDir(t, "somedir", folderLayout...)
+	defer workdir.Remove()
+
+	s3Content := map[string]string{
+		"a.txt": "S: a",
+		"z.txt": "S: z",
+	}
+	for key, content := range s3Content {
+		putFile(t, s3client, bucket, key, content)
+	}
+
+	src := fmt.Sprintf("%v/", workdir.Path())
+	src = filepath.ToSlash(src)
+	dst := fmt.Sprintf("s3://%v/", bucket)
+
+	cmd := s5cmd("sync", "--delete", src, dst)
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: contains(`ERROR "sync --delete=true %v %v": `, src, dst),
+	})
+
+	// nothing was deleted.
+	for key, content := range s3Content {
+		assert.Assert(t, ensureS3Object(s3client, bucket, key, content))
+	}
+}

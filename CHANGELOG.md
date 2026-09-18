@@ -7,6 +7,7 @@
 - Fixed `--log-file` silently falling back to stdout when the file cannot be opened; the command now fails with the reason.
 - Fixed `--no-clobber`, `--if-size-differ` and `--if-source-newer` sending the destination HEAD to the source region when `--destination-region` differs. ([#839](https://github.com/peak/s5cmd/issues/839), same as upstream [#862](https://github.com/peak/s5cmd/pull/862))
 - Fixed multipart copy (>5 GiB) ignoring `--metadata-directive REPLACE` and dropping the source SSE-KMS key.
+- Fixed `sync` carrying on after a failed listing. Errors while listing the source or destination were ignored unless their code was on a short list, so a `BucketRegionError` (bucket in another region than `AWS_REGION`) made `sync --delete` treat the bucket as empty: it re-uploaded everything, deleted nothing and exited 0. A failed source listing could even delete files still present. Any listing error now stops the sync with exit code 1, and the `rm` that `sync --delete` runs honours `--destination-region`. (upstream [#852](https://github.com/peak/s5cmd/issues/852))
 
 ## v2.4.0 - 18 Mar 2026
 

@@ -82,6 +82,15 @@ func NewDeleteCommand() *cli.Command {
 				Name:  "version-id",
 				Usage: "use the specified version of an object",
 			},
+			// Not meant for direct use: "sync --delete" forwards its
+			// --destination-region to the rm command it generates, so the
+			// objects are removed from the bucket in that region even when
+			// the environment or profile names another one.
+			&cli.StringFlag{
+				Name:   "destination-region",
+				Usage:  "set the region of the bucket the objects are removed from",
+				Hidden: true,
+			},
 		},
 		CustomHelpTemplate: deleteHelpTemplate,
 		Before: func(c *cli.Context) error {
@@ -114,6 +123,11 @@ func NewDeleteCommand() *cli.Command {
 				return err
 			}
 
+			storageOpts := NewStorageOpts(c)
+			if region := c.String("destination-region"); region != "" {
+				storageOpts.SetRegion(region)
+			}
+
 			return Delete{
 				src:         srcUrls,
 				op:          c.Command.Name,
@@ -127,7 +141,7 @@ func NewDeleteCommand() *cli.Command {
 				excludePatterns: excludePatterns,
 				includePatterns: includePatterns,
 
-				storageOpts: NewStorageOpts(c),
+				storageOpts: storageOpts,
 			}.Run(c.Context)
 		},
 	}

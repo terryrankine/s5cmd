@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -9,13 +10,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/hashicorp/go-multierror"
 	"github.com/lanrat/extsort"
 	"github.com/urfave/cli/v2"
 
 	errorpkg "github.com/peak/s5cmd/v2/error"
-	"github.com/peak/s5cmd/v2/log"
 	"github.com/peak/s5cmd/v2/log/stat"
 	"github.com/peak/s5cmd/v2/parallel"
 	"github.com/peak/s5cmd/v2/storage"
@@ -83,7 +82,7 @@ func NewSyncCommandFlags() []cli.Flag {
 		},
 		&cli.BoolFlag{
 			Name:  "exit-on-error",
-			Usage: "stops the sync process if an error is received",
+			Usage: "stops the sync process if an error is received (kept for backward compatibility: an error while listing the source or the destination always stops the sync)",
 		},
 	}
 	sharedFlags := NewSharedFlags()
@@ -128,11 +127,10 @@ type Sync struct {
 	fullCommand string
 
 	// flags
-	delete      bool
-	sizeOnly    bool
-	exitOnError bool
-	exclude     []string
-	include     []string
+	delete   bool
+	sizeOnly bool
+	exclude  []string
+	include  []string
 
 	// patterns
 	excludePatterns []*regexp.Regexp
@@ -158,11 +156,10 @@ func NewSync(c *cli.Context) Sync {
 		fullCommand: commandFromContext(c),
 
 		// flags
-		delete:      c.Bool("delete"),
-		sizeOnly:    c.Bool("size-only"),
-		exitOnError: c.Bool("exit-on-error"),
-		exclude:     c.StringSlice("exclude"),
-		include:     c.StringSlice("include"),
+		delete:   c.Bool("delete"),
+		sizeOnly: c.Bool("size-only"),
+		exclude:  c.StringSlice("exclude"),
+		include:  c.StringSlice("include"),
 
 		// flags
 		followSymlinks: !c.Bool("no-follow-symlinks"),
@@ -380,14 +377,12 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 			defer close(filteredSrcObjectChannel)
 			// filter and redirect objects
 			for st := range unfilteredSrcObjectChannel {
-				if st.Err != nil && s.shouldStopSync(st.Err) {
-					msg := log.ErrorMessage{
-						Err:       cleanupError(st.Err),
-						Command:   s.fullCommand,
-						Operation: s.op,
-					}
-					log.Error(msg)
+				if isListingError(st.Err) {
+					// the source listing is incomplete, so no correct plan
+					// can be made from it: report the error and stop.
+					printError(s.fullCommand, s.op, st.Err)
 					cancel()
+					continue
 				}
 				if s.shouldSkipSrcObject(st, true) {
 					continue
@@ -421,14 +416,14 @@ func (s Sync) getSourceAndDestinationObjects(ctx context.Context, cancel context
 			defer close(filteredDstObjectChannel)
 			// filter and redirect objects
 			for dt := range unfilteredDestObjectsChannel {
-				if dt.Err != nil && s.shouldStopSync(dt.Err) {
-					msg := log.ErrorMessage{
-						Err:       cleanupError(dt.Err),
-						Command:   s.fullCommand,
-						Operation: s.op,
-					}
-					log.Error(msg)
+				if isListingError(dt.Err) {
+					// the destination listing is incomplete. Going on would
+					// treat the destination as (partly) empty: every source
+					// object would be copied again and --delete would remove
+					// nothing, or the wrong objects. Report the error and stop.
+					printError(s.fullCommand, s.op, dt.Err)
 					cancel()
+					continue
 				}
 				if s.shouldSkipDstObject(dt, false) {
 					continue
@@ -567,7 +562,10 @@ func (s Sync) planRun(
 				}
 			}
 
-			if len(dstURLs) == 0 {
+			// a listing error cancels the context. The objects seen until
+			// then are only part of the picture, so nothing may be deleted
+			// based on them.
+			if ctx.Err() != nil || len(dstURLs) == 0 {
 				return
 			}
 
@@ -662,16 +660,14 @@ func (s Sync) shouldSkipDstObject(object *storage.Object, verbose bool) bool {
 	return false
 }
 
-// shouldStopSync determines whether a sync process should be stopped or not.
-func (s Sync) shouldStopSync(err error) bool {
-	if err == storage.ErrNoObjectFound {
+// isListingError reports whether err, received while listing the source or
+// the destination, leaves that listing incomplete. An empty listing (no
+// object or no match found) and a cancellation are not errors of that kind.
+// Any other error is, whatever its code: the sync must stop, or it would plan
+// from a partial listing.
+func isListingError(err error) bool {
+	if err == nil || errors.Is(err, storage.ErrNoObjectFound) {
 		return false
 	}
-	if awsErr, ok := err.(awserr.Error); ok {
-		switch awsErr.Code() {
-		case "AccessDenied", "NoSuchBucket", "RequestError", "SerializationError":
-			return true
-		}
-	}
-	return s.exitOnError
+	return !errorpkg.IsCancelation(err)
 }

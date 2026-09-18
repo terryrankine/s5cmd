@@ -180,7 +180,7 @@ requests to AWS. Credentials can be provided in a [variety of ways](https://docs
 
 While executing the commands, `s5cmd` detects the region according to the following order of priority:
 
-1. `--source-region` or `--destination-region` flags of `cp` command.
+1. `--source-region` or `--destination-region` flags of the `cp` and `sync` commands (the `rm` that `sync --delete` runs uses `--destination-region` too).
 2. `AWS_REGION` environment variable.
 3. Region section of AWS profile.
 4. Auto detection from bucket region (via `HeadBucket` API call).

@@ -1,21 +1,43 @@
 package command
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	"github.com/aws/aws-sdk-go/aws/awserr"
+
+	"github.com/peak/s5cmd/v2/storage"
 )
 
-func TestShouldStopSync(t *testing.T) {
+func TestIsListingError(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		err         error
-		exitOnError bool
-		want        bool
+		name string
+		err  error
+		want bool
 	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "empty S3 listing is not an error",
+			err:  storage.ErrNoObjectFound,
+			want: false,
+		},
+		{
+			name: "local wildcard without a match is an empty listing",
+			err:  &storage.ErrNoMatchFound{Pattern: "dir/*"},
+			want: false,
+		},
+		{
+			name: "cancellation is not a listing error",
+			err:  context.Canceled,
+			want: false,
+		},
 		{
 			name: "AccessDenied",
 			err:  awserr.New("AccessDenied", "access denied", nil),
@@ -27,36 +49,24 @@ func TestShouldStopSync(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "BucketRegionError",
+			err:  awserr.New("BucketRegionError", "incorrect region", nil),
+			want: true,
+		},
+		{
 			name: "RequestError",
 			err:  awserr.New("RequestError", "request error", nil),
 			want: true,
 		},
 		{
-			name: "SerializationError",
-			err:  awserr.New("SerializationError", "serialization error", nil),
+			name: "SlowDown after retries are exhausted",
+			err:  awserr.New("SlowDown", "slow down", nil),
 			want: true,
 		},
 		{
-			name: "SlowDown should not stop",
-			err:  awserr.New("SlowDown", "slow down", nil),
-			want: false,
-		},
-		{
-			name:        "non-AWS error with exitOnError true",
-			err:         fmt.Errorf("some random error"),
-			exitOnError: true,
-			want:        true,
-		},
-		{
-			name:        "non-AWS error with exitOnError false",
-			err:         fmt.Errorf("some random error"),
-			exitOnError: false,
-			want:        false,
-		},
-		{
-			name: "nil error",
-			err:  nil,
-			want: false,
+			name: "non-AWS error",
+			err:  fmt.Errorf("lstat dangling: no such file or directory"),
+			want: true,
 		},
 	}
 
@@ -65,13 +75,9 @@ func TestShouldStopSync(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			s := Sync{
-				exitOnError: tc.exitOnError,
-			}
-
-			got := s.shouldStopSync(tc.err)
+			got := isListingError(tc.err)
 			if got != tc.want {
-				t.Errorf("shouldStopSync(%v) = %v, want %v", tc.err, got, tc.want)
+				t.Errorf("isListingError(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}

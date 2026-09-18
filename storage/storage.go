@@ -29,6 +29,22 @@ func (e *ErrGivenObjectNotFound) Error() string {
 	return fmt.Sprintf("given object %v not found", e.ObjectAbsPath)
 }
 
+// ErrNoMatchFound indicates a local wildcard matches nothing. It is the
+// filesystem counterpart of ErrNoObjectFound: errors.Is(err, ErrNoObjectFound)
+// holds for it.
+type ErrNoMatchFound struct {
+	Pattern string
+}
+
+func (e *ErrNoMatchFound) Error() string {
+	return fmt.Sprintf("no match found for %q", e.Pattern)
+}
+
+// Is makes errors.Is treat ErrNoMatchFound as ErrNoObjectFound.
+func (e *ErrNoMatchFound) Is(target error) bool {
+	return target == ErrNoObjectFound
+}
+
 // Storage is an interface for storage operations that is common
 // to local filesystem and remote object storage.
 type Storage interface {
