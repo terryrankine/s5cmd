@@ -3814,6 +3814,9 @@ func TestCopyDirWithDanglingSymlinkToS3NoFollowSymlinks(t *testing.T) {
 func TestCopyDirWithSymlinkToUnreadableFileToS3(t *testing.T) {
 	t.Parallel()
 	requireSymlinks(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("windows does not honour unix mode bits: a mode-0 file is still readable")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root can read a file with no permission bits")
 	}
