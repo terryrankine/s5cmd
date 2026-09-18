@@ -437,8 +437,20 @@ func parseBatch(prefix string, key string) string {
 //	key: a/b/c/d
 //	prefix: a/b
 //	output: c/
+//
+// A key that equals a non-directory prefix (an exact object match) is
+// rendered relative to the parent of the prefix, the same base its
+// siblings use:
+//
+//	key: a/b/c/foo
+//	prefix: a/b/c/foo
+//	output: foo
 func parseNonBatch(prefix string, key string) string {
-	if key == prefix || !strings.HasPrefix(key, prefix) {
+	if !strings.HasPrefix(key, prefix) {
+		return key
+	}
+	if key == prefix && strings.HasSuffix(key, s3Separator) {
+		// exact match of a directory-marker object; keep the key as is.
 		return key
 	}
 	parsedKey := strings.TrimSuffix(key, s3Separator)

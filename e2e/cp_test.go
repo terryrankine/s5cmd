@@ -145,6 +145,39 @@ func TestCopySingleS3ObjectToLocal(t *testing.T) {
 	}
 }
 
+// cp s3://bucket/a/b/c/foo dir/
+//
+// The exact object is copied as dir/foo; siblings sharing the key as a prefix
+// (a/b/c/foo/bar, a/b/c/foobar) are left alone.
+func TestCopySingleNestedS3ObjectWithSiblingsToLocal(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const content = "this is a file content"
+
+	putFile(t, s3client, bucket, "a/b/c/foo", content)
+	putFile(t, s3client, bucket, "a/b/c/foo/bar", content)
+	putFile(t, s3client, bucket, "a/b/c/foobar", content)
+
+	src := fmt.Sprintf("s3://%v/a/b/c/foo", bucket)
+	cmd := s5cmd("cp", src, "dir/")
+	result := icmd.RunCmd(cmd)
+
+	result.Assert(t, icmd.Success)
+
+	assertLines(t, result.Stdout(), map[int]compareFunc{
+		0: equals("cp %v dir/foo", src),
+	})
+
+	// assert local filesystem
+	expected := fs.Expected(t, fs.WithDir("dir", fs.WithFile("foo", content, fs.WithMode(0644))))
+	assert.Assert(t, fs.Equal(cmd.Dir, expected))
+}
+
 // --json cp s3://bucket/object .
 func TestCopySingleS3ObjectToLocalJSON(t *testing.T) {
 	t.Parallel()
