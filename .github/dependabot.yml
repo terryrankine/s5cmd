@@ -1,26 +1,45 @@
 version: 2
 updates:
-  # Dependencies listed in go.mod
+  # Runtime dependencies. Security updates always; version updates only for
+  # the modules that carry the network/crypto surface. A merged PR here is
+  # released automatically as a patch (see auto-release.yml).
   - package-ecosystem: "gomod"
-    directory: "/" # Location of package manifests
-    schedule:
-      interval: "weekly"
-    # Create security fix PRs only
-    open-pull-requests-limit: 0
-
-  # Developer tooling pinned in tools/go.mod
-  - package-ecosystem: "gomod"
-    directory: "/tools"
-    schedule:
-      interval: "weekly"
-    # Create security fix PRs only
-    open-pull-requests-limit: 0
-
-
-  # Dependencies listed in .github/workflows/*.yml
-  - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    # Create security fix PRs only
-    open-pull-requests-limit: 0
+      day: "monday"
+    vendor: true
+    open-pull-requests-limit: 3
+    labels: ["automation", "dependencies"]
+    allow:
+      - dependency-name: "github.com/aws/aws-sdk-go"
+      - dependency-name: "golang.org/x/*"
+    groups:
+      golang-x:
+        patterns: ["golang.org/x/*"]
+
+  # Developer tooling (linters, mockgen). Not shipped; no release on merge
+  # matters, but it still goes through auto-release as a harmless patch.
+  - package-ecosystem: "gomod"
+    directory: "/tools"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 2
+    labels: ["automation", "dependencies"]
+
+  # Base images of the release container (golang builder and alpine runtime).
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 2
+    labels: ["automation", "dependencies"]
+
+  # GitHub Actions used by the workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 2
+    labels: ["automation", "dependencies"]

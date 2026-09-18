@@ -1,0 +1,146 @@
+name: maintenance
+# Runs on its own. Anything that needs a person opens a PR or an issue
+# labelled "needs-human"; a failed run is itself the notification.
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays 06:00 UTC
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+jobs:
+  # 1. Does master still build and pass on today's runners and images?
+  #    Catches the world moving (removed Docker images, runner changes,
+  #    expired certificates) before a release needs it.
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 45677:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          for _ in $(seq 1 30); do curl -sf http://localhost:45677/minio/health/live && exit 0; sleep 1; done
+          docker logs minio; exit 1
+      - run: make build && make test
+        env:
+          S5CMD_TEST_ENDPOINT_URL: http://localhost:45677
+      - if: failure()
+        uses: ./.github/actions/needs-human
+        with:
+          title: "maintenance: master no longer passes on current runners"
+          body: "The weekly health run of `make test` on master failed. See the run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  # 2. Known vulnerabilities reachable from our code (not just present in
+  #    the module graph). A finding opens a PR that bumps the toolchain
+  #    and/or dependencies; merging it triggers an automatic patch release.
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GORELEASER_TOKEN }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Scan
+        id: scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          set +e
+          GOFLAGS=-mod=mod govulncheck ./... > vulns.txt 2>&1
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+          cat vulns.txt
+      - name: Try to fix by updating dependencies
+        if: steps.scan.outputs.exit == '3'
+        id: fix
+        run: |
+          set -e
+          go get -u ./... 2>&1 | tail -5
+          go mod tidy && go mod vendor
+          git diff --quiet || echo "changed=true" >> "$GITHUB_OUTPUT"
+      - name: Open fix PR
+        if: steps.scan.outputs.exit == '3' && steps.fix.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GORELEASER_TOKEN }}
+        run: |
+          branch="maintenance/security-$(date +%Y%m%d)"
+          git config user.name "s5cmd-maintenance"
+          git config user.email "maintenance@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add -A
+          {
+            echo "deps: update to clear govulncheck findings"
+            echo
+            sed -n '1,60p' vulns.txt
+          } > msg.txt
+          git commit -F msg.txt
+          rm msg.txt
+          git push -u origin "$branch"
+          {
+            echo "govulncheck found vulnerabilities reachable from s5cmd; this bumps dependencies to clear them. Merging tags an automatic patch release."
+            echo
+            echo '```'
+            sed -n '1,80p' vulns.txt
+            echo '```'
+          } > body.md
+          gh pr create --base master --head "$branch" --label security --label automation --title "deps: update to clear govulncheck findings" --body-file body.md
+      - name: Escalate if it cannot be fixed by a dependency bump
+        if: steps.scan.outputs.exit == '3' && steps.fix.outputs.changed != 'true'
+        uses: ./.github/actions/needs-human
+        with:
+          title: "security: govulncheck finding needs a Go toolchain bump or code change"
+          body: |
+            `govulncheck` reports a reachable vulnerability that `go get -u` cannot clear — most likely a Go standard-library fix. Bump the Go version in `ci.yml`, `goreleaser.yml` and `Dockerfile`, then tag a patch release. Findings are in the run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  # 3. Go release drift: build/test on the two releases Go supports.
+  #    When a new Go major ships, open a PR moving "current"; the floor
+  #    (go.mod) moves only in a minor release, by hand.
+  go-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GORELEASER_TOKEN }}
+      - name: Compare CI matrix with go.dev
+        id: drift
+        run: |
+          latest=$(curl -sf 'https://go.dev/dl/?mode=json' | python3 -c 'import sys,json;print([v["version"] for v in json.load(sys.stdin) if v["stable"]][0])')
+          major=$(echo "$latest" | sed -E 's/^go([0-9]+\.[0-9]+).*/\1/')
+          current=$(grep -oE '^\s+- 1\.[0-9]+\.x\s+# current' .github/workflows/ci.yml | grep -oE '1\.[0-9]+' | head -1)
+          echo "latest=$major current=$current"
+          echo "latest=$major" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          [ "$major" != "$current" ] && echo "drift=true" >> "$GITHUB_OUTPUT" || true
+      - name: Open Go bump PR
+        if: steps.drift.outputs.drift == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GORELEASER_TOKEN }}
+          NEW: ${{ steps.drift.outputs.latest }}
+          OLD: ${{ steps.drift.outputs.current }}
+        run: |
+          branch="maintenance/go-$NEW"
+          if gh pr list --head "$branch" --json number -q 'length' | grep -q '^[1-9]'; then echo "PR exists"; exit 0; fi
+          sed -i -E "s/- $OLD\.x(\s+# current)/- $NEW.x\1/" .github/workflows/ci.yml
+          sed -i -E "s/go-version: $OLD\.x/go-version: $NEW.x/g" .github/workflows/goreleaser.yml .github/workflows/ci.yml
+          sed -i -E "s/^FROM golang:$OLD-alpine/FROM golang:$NEW-alpine/" Dockerfile
+          git config user.name "s5cmd-maintenance"
+          git config user.email "maintenance@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add -A
+          {
+            echo "ci: build and release with Go $NEW"
+            echo
+            echo "Go $NEW is the current release; $OLD moves to the older supported slot."
+            echo "The go.mod floor is unchanged (it moves in a minor release, by hand,"
+            echo "once the release it names is no longer supported by Go)."
+          } > msg.txt
+          git commit -F msg.txt
+          rm msg.txt
+          git push -u origin "$branch"
+          gh pr create --base master --head "$branch" --label automation \
+            --title "ci: build and release with Go $NEW" \
+            --body "Go $NEW is out. This moves the *current* build/release toolchain; the \`go.mod\` floor is a separate, manual minor-release decision. CI on this PR is the test. Merging tags a patch release."
