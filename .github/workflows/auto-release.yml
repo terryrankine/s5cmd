@@ -1,0 +1,88 @@
+name: auto-release
+# Patch releases without a person: when a dependency/security/toolchain PR
+# from Dependabot or the maintenance workflow is merged and CI on master is
+# green, add a CHANGELOG entry, tag the next patch version and push it.
+# The goreleaser workflow then builds, smoke-tests and publishes.
+#
+# Feature and behaviour changes are released by hand with a minor tag.
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+permissions:
+  contents: write
+  issues: write
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+jobs:
+  tag-patch:
+    if: >-
+      github.event.pull_request.merged == true &&
+      !startsWith(github.event.pull_request.head.ref, 'maintenance/changelog-') &&
+      (startsWith(github.event.pull_request.head.ref, 'dependabot/') ||
+       startsWith(github.event.pull_request.head.ref, 'maintenance/'))
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GORELEASER_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.GORELEASER_TOKEN }}
+      - name: Wait for CI on master
+        run: |
+          sha=$(git rev-parse HEAD)
+          for _ in $(seq 1 60); do
+            state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --jq '[.check_runs[] | select(.name == "ci-ok" or .name == "codespell")] | if length < 2 then "pending" elif all(.status == "completed") then (if all(.conclusion == "success") then "pass" else "fail" end) else "pending" end')
+            echo "ci: $state"
+            case "$state" in
+              pass) exit 0 ;;
+              fail) echo "CI failed on master; not releasing"; exit 1 ;;
+            esac
+            sleep 30
+          done
+          echo "CI did not finish in time"; exit 1
+      - name: Next patch version
+        id: ver
+        run: |
+          last=$(git describe --tags --abbrev=0 --match 'v*')
+          IFS=. read -r a b c <<<"${last#v}"
+          next="v$a.$b.$((c+1))"
+          echo "last=$last next=$next"
+          echo "last=$last" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+      # Tag the merge commit itself. master stays fully protected: nothing
+      # is pushed to it here. The CHANGELOG catches up through a docs-only
+      # PR that auto-merges once CI passes.
+      - name: Tag and push
+        env:
+          NEXT: ${{ steps.ver.outputs.next }}
+        run: |
+          git config user.name "s5cmd-maintenance"
+          git config user.email "maintenance@users.noreply.github.com"
+          git tag -a "$NEXT" -m "$NEXT (automatic patch release)"
+          git push origin "$NEXT"
+          echo "tagged $NEXT"
+      - name: CHANGELOG entry via auto-merged PR
+        env:
+          NEXT: ${{ steps.ver.outputs.next }}
+          LAST: ${{ steps.ver.outputs.last }}
+        run: |
+          date=$(date -u '+%d %b %Y')
+          since=$(git log -1 --format=%cI "$LAST")
+          prs=$(gh pr list --state merged --base master --search "merged:>=$since -head:maintenance/changelog-" --json number,title --jq '.[] | "- \(.title) (#\(.number))"')
+          python3 .github/scripts/changelog-entry.py "$NEXT" "$date" "$prs"
+          branch="maintenance/changelog-$NEXT"
+          git checkout -b "$branch"
+          git add CHANGELOG.md
+          git commit -m "changelog: $NEXT"
+          git push -u origin "$branch"
+          gh pr create --base master --head "$branch" --label automation             --title "changelog: $NEXT"             --body "Records the automatic patch release $NEXT. Auto-merges when CI passes; merging this PR does not trigger another release."
+          gh pr merge "$branch" --auto --merge
+      - if: failure()
+        uses: ./.github/actions/needs-human
+        with:
+          title: "auto-release: could not tag a patch release after PR #${{ github.event.pull_request.number }}"
+          body: "A maintenance/dependabot PR was merged but the automatic patch release did not happen. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

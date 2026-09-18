@@ -412,7 +412,24 @@ func s5cmd(workdir, endpoint string) func(args ...string) icmd.Cmd {
 	}
 }
 
+// testBinaryEnv names a prebuilt s5cmd to test instead of building one.
+// The release workflow uses it to run the e2e suite against the binary that
+// was actually uploaded.
+const testBinaryEnv = "S5CMD_TEST_BINARY"
+
 func goBuildS5cmd() func() {
+	if bin := os.Getenv(testBinaryEnv); bin != "" {
+		abs, err := filepath.Abs(bin)
+		if err != nil {
+			panic(err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			panic(fmt.Sprintf("%s: %v", testBinaryEnv, err))
+		}
+		s5cmdPath = abs
+		return func() {}
+	}
+
 	tmpdir, err := os.MkdirTemp("", "")
 	if err != nil {
 		panic(err)

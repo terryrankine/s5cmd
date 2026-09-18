@@ -6,6 +6,7 @@ on:
   pull_request:
     branches:
       - master
+  workflow_dispatch:
 jobs:
   build:
     strategy:
@@ -85,3 +86,15 @@ jobs:
 
     - run: make bootstrap
     - run: make check
+
+  # Stable name for branch protection: the matrix job names carry the Go
+  # version and change twice a year; this one does not.
+  ci-ok:
+    if: always()
+    needs: [build, test, qa]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All required jobs passed
+        run: |
+          echo '${{ toJSON(needs) }}' | grep -q '"result": "failure"\|"result": "cancelled"' && exit 1
+          echo ok

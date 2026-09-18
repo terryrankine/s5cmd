@@ -55,6 +55,18 @@ storage services and local filesystems.
 The [Releases](https://github.com/peak/s5cmd/releases) page provides pre-built
 binaries for Linux, macOS and Windows.
 
+#### Supported platforms
+
+The binaries are static. They run on Linux with kernel 3.2 or newer (any
+distribution, any libc), macOS 11 or newer, and Windows 10 / Server 2016 or
+newer. Container images are published for amd64, arm64, ppc64le, riscv64,
+arm/v6, arm/v7 and 386.
+
+Releases are built with the two Go versions Go itself supports; the minimum
+Go version for building from source is the `go` line in `go.mod`. Security
+and dependency updates ship as patch releases; there are no backports — the
+fix for any release is the next one. See [MAINTAINING.md](MAINTAINING.md).
+
 #### Homebrew
 
 For macOS, a [homebrew](https://brew.sh) tap is provided:
