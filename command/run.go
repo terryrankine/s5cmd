@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/kballard/go-shellquote"
@@ -40,6 +41,12 @@ func NewRunCommand() *cli.Command {
 		HelpName:           "run",
 		Usage:              "run commands in batch",
 		CustomHelpTemplate: runHelpTemplate,
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:  "exit-on-error",
+				Usage: "stop reading commands after the first one fails and cancel the ones still running",
+			},
+		},
 		Before: func(c *cli.Context) error {
 			err := validateRunCommand(c)
 			if err != nil {
@@ -70,14 +77,16 @@ type Run struct {
 	reader io.Reader
 
 	// flags
-	numWorkers int
+	numWorkers  int
+	exitOnError bool
 }
 
 func NewRun(c *cli.Context, r io.Reader) Run {
 	return Run{
-		c:          c,
-		reader:     r,
-		numWorkers: c.Int("numworkers"),
+		c:           c,
+		reader:      r,
+		numWorkers:  c.Int("numworkers"),
+		exitOnError: c.Bool("exit-on-error"),
 	}
 }
 
@@ -85,7 +94,19 @@ func (r Run) Run(ctx context.Context) error {
 	pm := parallel.New(r.numWorkers)
 	defer pm.Close()
 
-	waiter := parallel.NewWaiter()
+	// With --exit-on-error the first failing command cancels this context:
+	// the reader stops handing out lines and the commands still running
+	// see the cancellation.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var stopped atomic.Bool
+	waiter := parallel.NewWaiter(parallel.WithErrorHandler(func(error) {
+		if r.exitOnError {
+			stopped.Store(true)
+			cancel()
+		}
+	}))
 
 	reader := NewReader(ctx, r.reader)
 
@@ -134,8 +155,9 @@ func (r Run) Run(ctx context.Context) error {
 				return nil
 			}
 
-			ctx := cli.NewContext(app, flagset, r.c)
-			return cmd.Run(ctx)
+			cliCtx := cli.NewContext(app, flagset, r.c)
+			cliCtx.Context = ctx
+			return cmd.Run(cliCtx)
 		}
 
 		pm.Run(fn, waiter)
@@ -143,11 +165,17 @@ func (r Run) Run(ctx context.Context) error {
 
 	merrorWaiter := waiter.Wait()
 
-	if reader.Err() != nil {
-		printError(commandFromContext(r.c), r.c.Command.Name, reader.Err())
+	readErr := reader.Err()
+	if stopped.Load() && errors.Is(readErr, context.Canceled) {
+		// we stopped the reader ourselves; the command that failed has
+		// already been reported.
+		readErr = nil
+	}
+	if readErr != nil {
+		printError(commandFromContext(r.c), r.c.Command.Name, readErr)
 	}
 
-	return multierror.Append(merrorWaiter, reader.Err()).ErrorOrNil()
+	return multierror.Append(merrorWaiter, readErr).ErrorOrNil()
 }
 
 // Reader is a cancelable reader.

@@ -390,3 +390,46 @@ func TestRunFixDataRace_Issue301(t *testing.T) {
 
 	assertLines(t, result.Stderr(), map[int]compareFunc{})
 }
+
+// run --exit-on-error: the first failing command stops the rest.
+func TestRunExitOnError(t *testing.T) {
+	t.Parallel()
+
+	s3client, s5cmd := setup(t)
+
+	bucket := s3BucketFromTestName(t)
+	createBucket(t, s3client, bucket)
+
+	const numFiles = 40
+	lines := []string{fmt.Sprintf("ls s3://%v/does-not-exist.txt", bucket)}
+	for i := 0; i < numFiles; i++ {
+		filename := fmt.Sprintf("file%02d.txt", i)
+		putFile(t, s3client, bucket, filename, "content")
+		lines = append(lines, fmt.Sprintf("ls s3://%v/%s", bucket, filename))
+	}
+	input := strings.Join(lines, "\n")
+
+	// one worker so the failing first line is seen before the rest are
+	// dispatched; a couple of lines may already be in flight.
+	cmd := s5cmd("--numworkers", "1", "run", "--exit-on-error")
+	result := icmd.RunCmd(cmd, icmd.WithStdin(strings.NewReader(input)))
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+
+	listed := strings.Count(result.Stdout(), "file")
+	if listed >= numFiles {
+		t.Fatalf("expected the run to stop after the first error, but all %d commands ran", numFiles)
+	}
+	assertLines(t, result.Stderr(), map[int]compareFunc{
+		0: contains("does-not-exist.txt"),
+	})
+
+	// without the flag every command runs
+	cmd = s5cmd("--numworkers", "1", "run")
+	result = icmd.RunCmd(cmd, icmd.WithStdin(strings.NewReader(input)))
+
+	result.Assert(t, icmd.Expected{ExitCode: 1})
+	if listed := strings.Count(result.Stdout(), "file"); listed != numFiles {
+		t.Fatalf("expected all %d commands to run without --exit-on-error, got %d", numFiles, listed)
+	}
+}
