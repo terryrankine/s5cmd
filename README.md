@@ -73,6 +73,10 @@ For macOS, a [homebrew](https://brew.sh) tap is provided:
 
     brew install s5cmd
 
+This fork's releases are on their own tap:
+
+    brew install terryrankine/tap/s5cmd
+
 ### Unofficial Releases (by Community)
 [![Packaging status](https://repology.org/badge/tiny-repos/s5cmd.svg)](https://repology.org/project/s5cmd/versions)
 > **Warning**
