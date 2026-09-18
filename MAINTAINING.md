@@ -19,7 +19,7 @@ This fork exists to ship fixes upstream (`peak/s5cmd`) has not merged. The goal 
 | **minor** `vX.Y+1.0` | features, behaviour changes, Go floor bump | you: edit `CHANGELOG.md` (`## Unreleased` → version + date), `git tag -a vX.Y.0`, push the tag |
 | **major** | breaking CLI changes | you, same steps |
 
-Tags are unsigned; commits are signed. A tag push runs `goreleaser.yml`: build → **draft** release → smoke test of the uploaded Linux binary with the e2e suite (including the path-traversal guard) → publish with the CHANGELOG section as notes → `docker.yml` pushes `ghcr.io/<owner>/s5cmd:<tag>` and `:latest`.
+Tags are unsigned; commits are signed. `master` is protected by a ruleset: changes land only through a PR with green `build`/`test`/`qa` checks, no force-pushes, no bypass — the automation obeys the same rule, which is why it tags first and records the CHANGELOG through an auto-merged PR. A tag push runs `goreleaser.yml`: build → **draft** release → smoke test of the uploaded Linux binary with the e2e suite (including the path-traversal guard) → publish with the CHANGELOG section as notes → `docker.yml` pushes `ghcr.io/<owner>/s5cmd:<tag>` and `:latest`.
 
 ## What runs by itself
 
@@ -30,7 +30,7 @@ Tags are unsigned; commits are signed. A tag push runs `goreleaser.yml`: build �
 | `maintenance.yml` → `govulncheck` | Mondays | reachable-vulnerability scan; opens a `maintenance/security-*` PR that bumps deps, or a `needs-human` issue if only a Go bump fixes it |
 | `maintenance.yml` → `go-drift` | Mondays | new Go major → PR moving "current" in CI, goreleaser and Dockerfile |
 | Dependabot | Mondays / monthly | `aws-sdk-go`, `golang.org/x/*`, Docker base images, Actions, tools module |
-| `auto-release.yml` | on merge of `dependabot/*` or `maintenance/*` | waits for green CI on master, adds a CHANGELOG entry, tags the next patch |
+| `auto-release.yml` | on merge of `dependabot/*` or `maintenance/*` | waits for green CI on master, tags the next patch, then opens a docs-only `maintenance/changelog-*` PR that auto-merges — nothing is ever pushed to master directly |
 | `goreleaser.yml` | on tag | build, smoke, publish |
 | `docker.yml` | on publish | multi-arch image to GHCR |
 

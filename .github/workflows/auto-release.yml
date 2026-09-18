@@ -19,6 +19,7 @@ jobs:
   tag-patch:
     if: >-
       github.event.pull_request.merged == true &&
+      !startsWith(github.event.pull_request.head.ref, 'maintenance/changelog-') &&
       (startsWith(github.event.pull_request.head.ref, 'dependabot/') ||
        startsWith(github.event.pull_request.head.ref, 'maintenance/'))
     runs-on: ubuntu-latest
@@ -52,38 +53,34 @@ jobs:
           echo "last=$last next=$next"
           echo "last=$last" >> "$GITHUB_OUTPUT"
           echo "next=$next" >> "$GITHUB_OUTPUT"
-      - name: CHANGELOG entry
-        env:
-          NEXT: ${{ steps.ver.outputs.next }}
-          LAST: ${{ steps.ver.outputs.last }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          date=$(date -u '+%d %b %Y')
-          # Every merged PR since the last tag, so a batch of Dependabot merges is one release.
-          prs=$(gh pr list --state merged --base master --search "merged:>=$(git log -1 --format=%cI "$LAST")" --json number,title,headRefName --jq '.[] | "- \(.title) (#\(.number))"')
-          [ -n "$prs" ] || prs="- $PR_TITLE (#$PR_NUMBER)"
-          python3 - "$NEXT" "$date" "$prs" <<'EOF'
-          import sys
-          nxt, date, prs = sys.argv[1], sys.argv[2], sys.argv[3]
-          p = 'CHANGELOG.md'
-          s = open(p, encoding='utf-8').read()
-          entry = f"## {nxt} - {date}\n\n#### Dependencies and toolchain\nAutomatic patch release.\n\n{prs}\n\n"
-          s = s.replace('# Changelog\n', '# Changelog\n' + entry, 1)
-          open(p, 'w', encoding='utf-8', newline='\n').write(s)
-          EOF
-          git config user.name "s5cmd-maintenance"
-          git config user.email "maintenance@users.noreply.github.com"
-          git add CHANGELOG.md
-          git commit -m "changelog: $NEXT"
-          git push origin master
+      # Tag the merge commit itself. master stays fully protected: nothing
+      # is pushed to it here. The CHANGELOG catches up through a docs-only
+      # PR that auto-merges once CI passes.
       - name: Tag and push
         env:
           NEXT: ${{ steps.ver.outputs.next }}
         run: |
+          git config user.name "s5cmd-maintenance"
+          git config user.email "maintenance@users.noreply.github.com"
           git tag -a "$NEXT" -m "$NEXT (automatic patch release)"
           git push origin "$NEXT"
           echo "tagged $NEXT"
+      - name: CHANGELOG entry via auto-merged PR
+        env:
+          NEXT: ${{ steps.ver.outputs.next }}
+          LAST: ${{ steps.ver.outputs.last }}
+        run: |
+          date=$(date -u '+%d %b %Y')
+          since=$(git log -1 --format=%cI "$LAST")
+          prs=$(gh pr list --state merged --base master --search "merged:>=$since -head:maintenance/changelog-" --json number,title --jq '.[] | "- \(.title) (#\(.number))"')
+          python3 .github/scripts/changelog-entry.py "$NEXT" "$date" "$prs"
+          branch="maintenance/changelog-$NEXT"
+          git checkout -b "$branch"
+          git add CHANGELOG.md
+          git commit -m "changelog: $NEXT"
+          git push -u origin "$branch"
+          gh pr create --base master --head "$branch" --label automation             --title "changelog: $NEXT"             --body "Records the automatic patch release $NEXT. Auto-merges when CI passes; merging this PR does not trigger another release."
+          gh pr merge "$branch" --auto --merge
       - if: failure()
         uses: ./.github/actions/needs-human
         with:
